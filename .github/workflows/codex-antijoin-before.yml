@@ -1,0 +1,109 @@
+name: PETL native antijoin before diagnostic
+on:
+  push:
+    branches: [codex/diagnose-antijoin-none]
+permissions:
+  contents: read
+jobs:
+  before:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PIP_NO_CACHE_DIR: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        working-directory: package
+        shell: bash
+    steps:
+      - name: Check out actual pinned upstream package
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: petl-developers/petl
+          ref: 9cc6c751e0a68c034b270478599cb1be351c530e
+          path: package
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python 3.13 without cache
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Install real editable package and minimal pytest
+        run: python -m pip install --no-cache-dir -e . pytest
+      - name: Prove expected failing native behavior and source identity
+        run: |
+          python - <<'PY_NATIVE'
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+
+          import petl
+
+          pin = "9cc6c751e0a68c034b270478599cb1be351c530e"
+          root = Path.cwd().resolve()
+          module_path = Path(petl.__file__).resolve()
+          assert module_path == root / "petl" / "__init__.py", module_path
+          assert module_path.is_relative_to(root)
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert head == pin, head
+          tracked_before = subprocess.check_output(
+              ["git", "status", "--porcelain", "--untracked-files=no"], text=True
+          )
+          assert tracked_before == "", tracked_before
+          work = root / "codex_diagnostic"
+          work.mkdir()
+          fixture = work / "test_antijoin.py"
+          fixture.write_text('"""Proposed native PETL anti-join regressions; not run by diagnostic lane."""\n\nimport petl as etl\nimport pytest\n\n\n@pytest.mark.parametrize("presorted", [False, True])\n@pytest.mark.parametrize("rows", [\n    [(None, 10)],\n    [(None, 10), (None, 20)],\n    [(None, 10), (None, 20), (2, 30)],\n])\ndef test_antijoin_empty_right_preserves_none_group(presorted, rows):\n    left = [("id", "amount")] + rows\n    right = [("id",)]\n    result = list(etl.antijoin(left, right, key="id", presorted=presorted))\n    assert result == left\n    assert sum(row[1] for row in result[1:]) == sum(row[1] for row in rows)\n\n\n@pytest.mark.parametrize("presorted", [False, True])\ndef test_antijoin_empty_right_preserves_separate_key_none_group(presorted):\n    left = [("id", "amount"), (None, 10), (None, 20), (2, 30)]\n    right = [("reference",)]\n    result = list(etl.antijoin(left, right, lkey="id", rkey="reference",\n                               presorted=presorted))\n    assert result == left\n\n\n@pytest.mark.parametrize("presorted", [False, True])\ndef test_antijoin_nonempty_right_still_removes_matching_none(presorted):\n    left = [("id", "amount"), (None, 10), (None, 20), (2, 30)]\n    right = [("id",), (None,)]\n    assert list(etl.antijoin(left, right, key="id", presorted=presorted)) == [\n        ("id", "amount"), (2, 30)\n    ]\n\n\n@pytest.mark.parametrize("presorted", [False, True])\ndef test_antijoin_empty_left_and_right_control(presorted):\n    assert list(etl.antijoin([("id", "amount")], [("id",)], key="id",\n                            presorted=presorted)) == [("id", "amount")]\n', encoding="utf-8")
+          result = subprocess.run(
+              [sys.executable, "-m", "pytest", str(fixture), "-q", "--tb=short",
+               "--junitxml=" + str(work / "result.xml")],
+              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+          )
+          print(result.stdout)
+          cases = list(ET.parse(work / "result.xml").getroot().iter("testcase"))
+          failures = [case for case in cases if case.find("failure") is not None]
+          errors = [case for case in cases if case.find("error") is not None]
+          skipped = [case for case in cases if case.find("skipped") is not None]
+          counts = {
+              "tests": len(cases), "failures": len(failures), "errors": len(errors),
+              "skipped": len(skipped),
+              "passed": len(cases) - len(failures) - len(errors) - len(skipped),
+          }
+          actual_examples = []
+          for presorted in (False, True):
+              left = [("id", "amount"), (None, 10), (None, 20), (2, 30)]
+              actual = list(petl.antijoin(left, [("id",)], key="id", presorted=presorted))
+              actual_examples.append({
+                  "presorted": presorted, "input_left": left,
+                  "input_right": [("id",)], "expected": left, "actual": actual,
+                  "expected_amount_total": 60,
+                  "actual_amount_total": sum(row[1] for row in actual[1:]),
+              })
+          tracked_after = subprocess.check_output(
+              ["git", "status", "--porcelain", "--untracked-files=no"], text=True
+          )
+          report = {
+              "repository": "petl-developers/petl", "pin": head,
+              "module_file": str(module_path), "python": sys.version,
+              "pytest_exit_code": result.returncode, "junit": counts,
+              "tracked_before": tracked_before, "tracked_after": tracked_after,
+              "actual_examples": actual_examples,
+              "actual_failures": [{"name": case.get("name"),
+                                   "message": case.find("failure").get("message"),
+                                   "detail": case.find("failure").text}
+                                  for case in failures],
+              "state": "expected bug reproduced; diagnostic success is not product green",
+              "whole_package_suite": "not run by this bounded native reproduction",
+          }
+          print("PETL_DIAGNOSTIC_JSON=" + json.dumps(report, sort_keys=True))
+          assert tracked_after == "", tracked_after
+          assert result.returncode == 1, result.returncode
+          assert counts == {"tests": 12, "failures": 8, "errors": 0, "skipped": 0, "passed": 4}, counts
+          for example in actual_examples:
+              assert example["actual"] == [("id", "amount"), (2, 30)], example
+              assert example["actual_amount_total"] == 30, example
+          print("DIAGNOSTIC_SUCCESS: expected before-state reproduced; product remains failing")
+          PY_NATIVE
