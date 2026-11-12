@@ -1,0 +1,2194 @@
+name: lmfit119 complex-weight contract and project checks
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/lmfit-complex-weights119]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [before, after]
+    env:
+      NEW119_PHASE: ${{ matrix.phase }}
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Checkout whole exact upstream source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: lmfit/lmfit-py
+          ref: 3a2439c2061ddeaf4cca8f99eb70a069e6a51a41
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Python without cache
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.12'
+      - name: Stage reviewed runtime guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NEW108_SOURCE="$GITHUB_WORKSPACE/target"
+          export NEW108_EVIDENCE="$RUNNER_TEMP/new119-evidence"
+          mkdir -p "$NEW108_EVIDENCE"
+          echo "NEW108_SOURCE=$NEW108_SOURCE" >> "$GITHUB_ENV"
+          echo "NEW108_EVIDENCE=$NEW108_EVIDENCE" >> "$GITHUB_ENV"
+          cat > "$NEW108_EVIDENCE/probe-guard.py" <<'NEW119_PROBE_GUARD_PY'
+          """Unexecuted hosted-runner provenance proposal; no target imports."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import sysconfig
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          stage = sys.argv[1]
+          snapshot_label = sys.argv[2] if len(sys.argv) > 2 else 'public16'
+          if snapshot_label not in ['public16', 'focused40']:
+              raise RuntimeError('invalid full-runtime snapshot label')
+          expected_head = '3a2439c2061ddeaf4cca8f99eb70a069e6a51a41'
+          expected_tree = '0f9806e9012d23735d055fc0b4f647212e44c180'
+          expected_index_tree = expected_tree
+          expected_status = ''
+          if os.environ.get('NEW119_PHASE') == 'after':
+              expected_index_tree = 'cc96366bdd5d7ee3e1fd8695ba24a677daf96d22'
+              expected_status = 'M  doc/model.rst\nM  doc/whatsnew.rst\nM  lmfit/model.py\nM  tests/test_model.py\n'
+          
+          
+          
+          def git(*arguments):
+              return subprocess.check_output(['git', '-C', str(root), *arguments])
+          
+          
+          def file_record(path):
+              info = path.lstat()
+              if stat.S_ISLNK(info.st_mode):
+                  return {'type': 'symlink', 'target': os.readlink(path)}
+              if not stat.S_ISREG(info.st_mode):
+                  raise RuntimeError('unexpected runtime entry type: '+str(path))
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      digest.update(chunk)
+              return {'type': 'file', 'size': info.st_size, 'mode': info.st_mode & 0o777,
+                      'sha256': digest.hexdigest()}
+          
+          
+          def collect(parent, output):
+              if parent.is_file() or parent.is_symlink():
+                  output[str(parent)] = file_record(parent)
+                  return
+              for current, directories, filenames in os.walk(parent, followlinks=False):
+                  directories[:] = [name for name in directories if name not in
+                                     ['.git', '__pycache__', '.pytest_cache', '.mypy_cache']]
+                  for name in list(directories):
+                      path = Path(current)/name
+                      if path.is_symlink():
+                          output[str(path)] = file_record(path)
+                          directories.remove(name)
+                  for name in filenames:
+                      if not name.endswith(('.pyc', '.pyo')):
+                          path = Path(current)/name
+                          output[str(path)] = file_record(path)
+          
+          
+          index = git('ls-files', '--stage', '-z')
+          tracked = {}
+          for record in index.split(b'\0'):
+              if not record:
+                  continue
+              header, encoded_name = record.split(b'\t', 1)
+              mode, oid, index_stage = header.split()
+              if index_stage != b'0':
+                  raise RuntimeError('unmerged index stage')
+              name = os.fsdecode(encoded_name)
+              path = root/name
+              info = path.lstat()
+              if mode == b'120000':
+                  if not stat.S_ISLNK(info.st_mode):
+                      raise RuntimeError('tracked symlink type changed: '+name)
+                  raw = os.fsencode(os.readlink(path))
+              elif mode in [b'100644', b'100755']:
+                  if not stat.S_ISREG(info.st_mode):
+                      raise RuntimeError('tracked regular file type changed: '+name)
+                  actual_mode = mode if os.name == 'nt' else (b'100755' if info.st_mode & 0o111 else b'100644')
+                  if actual_mode != mode:
+                      raise RuntimeError('tracked executable mode changed: '+name)
+                  descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                  with os.fdopen(descriptor, 'rb') as stream:
+                      raw = stream.read()
+              else:
+                  raise RuntimeError('unsupported tracked Git mode: '+mode.decode())
+              actual_blob = hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+              if actual_blob != oid.decode():
+                  raise RuntimeError('actual tracked blob differs from index: '+name)
+              tracked[name] = {'index_mode': mode.decode(), 'index_blob': oid.decode(),
+                               'actual_blob': actual_blob, 'file': file_record(path)}
+          source = {
+              'head': git('rev-parse', 'HEAD').decode().strip(),
+              'tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+              'index_tree': git('write-tree').decode().strip(),
+              'index_sha256': hashlib.sha256(index).hexdigest(),
+              'tracked': tracked,
+              'tracked_status': git('status', '--porcelain', '--untracked-files=no').decode(),
+          }
+          if (source['head'] != expected_head or source['tree'] != expected_tree
+                  or source['index_tree'] != expected_index_tree
+                  or source['tracked_status'] != expected_status):
+              raise RuntimeError('whole source does not match reviewed base/candidate commit/tree/index')
+          data = {'source': source}
+          if stage != 'source':
+              consumed = {}
+              for parent in [root, Path(sys.prefix), Path(sysconfig.get_path('stdlib')),
+                             Path(sys.executable).resolve(), destination/'probe-before.py',
+                             destination/'probe-guard.py', destination/'probe-assess.py',
+                             destination/'probe-assess-after.py', destination/'fix.patch',
+                             destination/'test_complex_weight_regressions.py',
+                             destination/'critical-runtime-guard.py']:
+                  collect(parent, consumed)
+              for command in ['git', 'ldd', 'nm']:
+                  executable = shutil.which(command)
+                  if executable is None:
+                      raise RuntimeError('missing guard tool: '+command)
+                  collect(Path(executable).resolve(), consumed)
+              binaries = [Path(sys.executable).resolve()]
+              extension_symbols = {}
+              for name, item in consumed.items():
+                  if item['type'] != 'file' or not (name.endswith('.so') or '.so.' in name):
+                      continue
+                  process = subprocess.run(['nm', '-D', '--defined-only', name],
+                                           capture_output=True, text=True)
+                  if process.returncode != 0:
+                      raise RuntimeError('ELF export scan failed: '+name+' '+process.stderr)
+                  symbols = sorted(line.split()[-1] for line in process.stdout.splitlines()
+                                   if line.split() and line.split()[-1].startswith('PyInit_'))
+                  if symbols:
+                      extension_symbols[name] = symbols
+                      binaries.append(Path(name))
+              linked = {}
+              for binary in sorted(set(binaries)):
+                  process = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
+                  if process.returncode not in [0, 1]:
+                      raise RuntimeError('ELF dependency scan failed: '+str(binary))
+                  if 'not found' in process.stdout:
+                      raise RuntimeError('ELF dependency missing: '+str(binary)+' '+process.stdout)
+                  for word in process.stdout.split():
+                      if word.startswith('/') and Path(word).is_file():
+                          path = Path(word).resolve()
+                          linked[str(path)] = file_record(path)
+              data.update(consumed=consumed, linked=linked, extension_symbols=extension_symbols,
+                          elf_roots=sorted(str(binary) for binary in set(binaries)),
+                          executable=str(Path(sys.executable).resolve()),
+                          prefix=sys.prefix, base_prefix=sys.base_prefix)
+          if stage == 'source':
+              (destination/'guard-source.json').write_text(json.dumps(data, sort_keys=True))
+          else:
+              original = json.loads((destination/'guard-source.json').read_text())
+              if original['source'] != source:
+                  raise RuntimeError('original tracked source changed during install/probe')
+              if stage == 'before':
+                  (destination/('guard-before-'+snapshot_label+'.json')).write_text(json.dumps(data, sort_keys=True))
+              elif stage == 'after':
+                  before = json.loads((destination/('guard-before-'+snapshot_label+'.json')).read_text())
+                  if before != data:
+                      for key in ['consumed', 'linked']:
+                          print('NEW108_CHANGED', key, [name for name in
+                              set(before.get(key, {})) | set(data.get(key, {}))
+                              if before.get(key, {}).get(name) != data.get(key, {}).get(name)], flush=True)
+                      raise RuntimeError('consumed source/build/dependency/runtime guard changed')
+              else:
+                  raise RuntimeError('invalid guard stage')
+          print('NEW108_GUARD', json.dumps({
+              'stage': stage, 'snapshot_label': snapshot_label,
+              'phase': os.environ.get('NEW119_PHASE'), 'head': source['head'], 'tree': source['tree'],
+              'index_tree': source['index_tree'], 'index_sha256': source['index_sha256'],
+              'tracked_count': len(tracked), 'all_actual_git_blobs_match': True,
+              'filesystem_tracks_executable_mode': os.name != 'nt',
+              'tracked_sha256': hashlib.sha256(json.dumps(tracked, sort_keys=True).encode()).hexdigest(),
+              'consumed_count': len(data.get('consumed', {})),
+              'consumed_sha256': hashlib.sha256(json.dumps(data.get('consumed', {}), sort_keys=True).encode()).hexdigest(),
+              'linked_count': len(data.get('linked', {})),
+              'elf_root_count': len(data.get('elf_roots', [])),
+              'extension_root_count': len(data.get('extension_symbols', {})), 'unchanged': True,
+          }), flush=True)
+          NEW119_PROBE_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/probe-guard.py"
+      - name: Stage frozen public fit driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/probe-before.py" <<'NEW119_PROBE_BEFORE_PY'
+          """Unexecuted diagnostic proposal. Execute only on the separately guarded hosted runner."""
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import traceback
+          
+          import numpy as np
+          import scipy
+          import lmfit
+          from lmfit import Model
+          
+          source = Path(os.environ['NEW108_SOURCE']).resolve()
+          for module in [lmfit, sys.modules['lmfit.model'], sys.modules['lmfit.minimizer']]:
+              if not Path(module.__file__).resolve().is_relative_to(source):
+                  raise RuntimeError('lmfit runtime is outside whole pinned source: '+module.__file__)
+          print('NEW108_RUNTIME', json.dumps({
+              'python': sys.version, 'executable': sys.executable,
+              'lmfit_file': lmfit.__file__, 'numpy_file': np.__file__,
+              'scipy_file': scipy.__file__,
+              'versions': {name: importlib.metadata.version(name) for name in
+                           ['lmfit', 'numpy', 'scipy', 'asteval', 'uncertainties', 'dill']},
+          }), flush=True)
+          
+          
+          def complex_model(x, a):
+              return a*(1+1j)*x
+          
+          
+          def real_model(x, a):
+              return a*x
+          
+          
+          records = []
+          for method in ['leastsq', 'least_squares']:
+              for case in ['unequal_1d', 'unequal_2d_F', 'unequal_2d_strided',
+                           'unequal_reversed', 'equal_complex', 'real_weights',
+                           'no_weights', 'real_only']:
+                  label = {'case': case, 'method': method}
+                  try:
+                      x = np.arange(1., 7.)
+                      if case in ['unequal_2d_F', 'unequal_2d_strided']:
+                          x = x.reshape(2, 3)
+                      if case == 'unequal_2d_F':
+                          x = np.asfortranarray(x)
+                      if case == 'unequal_2d_strided':
+                          x = np.stack([x, x], axis=-1)[..., 0]
+                      if case == 'unequal_reversed':
+                          x = x[::-1]
+                      is_real = case == 'real_only'
+                      data = 2*x + .1*np.sin(x) if is_real else np.ascontiguousarray(2j*x)
+                      if case == 'no_weights':
+                          weights = None
+                      elif case in ['real_only', 'real_weights']:
+                          weights = 1 + .1*x
+                      elif case == 'equal_complex':
+                          weights = np.full(x.shape, 1+1j)
+                      else:
+                          weights = np.full(x.shape, 1+10j)
+                      inputs = [array.copy() for array in [x, data] +
+                                ([] if weights is None else [weights])]
+                      wr = np.ones(x.shape) if weights is None else np.real(weights)
+                      wi = wr if weights is None or not np.iscomplexobj(weights) else np.imag(weights)
+                      if is_real:
+                          expected_a = float(np.sum(wr**2*x*data)/np.sum(wr**2*x*x))
+                      else:
+                          expected_a = float(np.sum(wr**2*x*data.real + wi**2*x*data.imag)
+                                             / np.sum((wr**2+wi**2)*x*x))
+                      result = Model(real_model if is_real else complex_model).fit(
+                          data, x=x, a=.5, weights=weights, method=method)
+                      actual_a = result.params['a'].value
+                      if is_real:
+                          expected_residual = ((data-expected_a*x)*wr).ravel()
+                      else:
+                          remaining = data-expected_a*(1+1j)*x
+                          expected_residual = np.stack([remaining.real*wr, remaining.imag*wi], axis=-1).ravel()
+                      record = dict(label, error=None, success=bool(result.success),
+                                    actual_a=actual_a, expected_a=expected_a,
+                                    predicted_buggy_a=None if is_real else 1.,
+                                    actual_residual=np.asarray(result.residual).tolist(),
+                                    expected_residual=expected_residual.tolist(),
+                                    actual_chisqr=float(result.chisqr),
+                                    expected_chisqr=float(np.sum(expected_residual**2)),
+                                    stderr=result.params['a'].stderr,
+                                    covariance=None if result.covar is None else result.covar.tolist(),
+                                    ndata=result.ndata, nvarys=result.nvarys,
+                                    dtype=str(data.dtype), shape=list(data.shape),
+                                    strides=list(x.strides),
+                                    inputs_unchanged=all(np.array_equal(before, after) for before, after in
+                                        zip(inputs, [x, data]+([] if weights is None else [weights]))))
+                  except Exception as error:
+                      record = dict(label, error={'type': type(error).__name__, 'message': str(error),
+                                                  'traceback': traceback.format_exc()})
+                  records.append(record)
+                  print('NEW108_RAW', json.dumps(record, allow_nan=False), flush=True)
+          
+          raise SystemExit(2 if any(record['error'] for record in records) else 0)
+          NEW119_PROBE_BEFORE_PY
+          sha256sum "$NEW108_EVIDENCE/probe-before.py"
+      - name: Stage original and literal-inverse assessors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/probe-assess.py" <<'NEW119_PROBE_ASSESS_PY'
+          """Assess saved raw observations only after process status and source/runtime guards."""
+          import json
+          import math
+          import os
+          from pathlib import Path
+          
+          destination = Path(os.environ['NEW108_EVIDENCE'])
+          status = (destination/'before.status').read_text().strip()
+          print('NEW108_RECORDED_PROCESS_STATUS', status, flush=True)
+          if status != '0':
+              raise SystemExit('native process did not complete successfully; no defect qualification')
+          records = [json.loads(line.removeprefix('NEW108_RAW '))
+                     for line in (destination/'before.log').read_text().splitlines()
+                     if line.startswith('NEW108_RAW ')]
+          cases = ['unequal_1d', 'unequal_2d_F', 'unequal_2d_strided', 'unequal_reversed',
+                   'equal_complex', 'real_weights', 'no_weights', 'real_only']
+          expected_keys = {(case, method) for case in cases for method in ['leastsq', 'least_squares']}
+          if len(records) != len(expected_keys) or {(r['case'], r['method']) for r in records} != expected_keys:
+              raise SystemExit('missing or duplicated public fit records')
+          assessments = []
+          unexpected = []
+          for record in records:
+              assessment = {key: record[key] for key in ['case', 'method']}
+              if record['error'] is not None:
+                  assessment['runtime_error'] = record['error']
+                  unexpected.append(assessment)
+              else:
+                  close = lambda first, second: math.isclose(first, second, rel_tol=1e-7, abs_tol=1e-7)
+                  actual_residual = record['actual_residual']
+                  expected_residual = record['expected_residual']
+                  assessment.update(parameter_contract=close(record['actual_a'], record['expected_a']),
+                      residual_contract=len(actual_residual) == len(expected_residual) and
+                          all(close(a, e) for a, e in zip(actual_residual, expected_residual)),
+                      chisqr_contract=close(record['actual_chisqr'], record['expected_chisqr']),
+                      optimizer_success=record['success'], inputs_unchanged=record['inputs_unchanged'])
+                  unequal = record['case'].startswith('unequal_')
+                  expected_parameter_pass = not unequal
+                  expected_residual_pass = not unequal and record['case'] != 'equal_complex'
+                  if (not record['success'] or not record['inputs_unchanged']
+                          or assessment['parameter_contract'] != expected_parameter_pass
+                          or assessment['residual_contract'] != expected_residual_pass
+                          or assessment['chisqr_contract'] != expected_residual_pass
+                          or (unequal and not close(record['actual_a'], 1.))):
+                      unexpected.append(assessment)
+              assessments.append(assessment)
+          print('NEW108_ASSESS', json.dumps({'cases': assessments, 'unexpected': unexpected,
+              'diagnostic_exit_zero_is_not_contract_success': True}), flush=True)
+          raise SystemExit(2 if unexpected else 0)
+          NEW119_PROBE_ASSESS_PY
+          sha256sum "$NEW108_EVIDENCE/probe-assess.py"
+          cat > "$NEW108_EVIDENCE/probe-assess-after.py" <<'NEW119_PROBE_ASSESS_AFTER_PY'
+          """Assess saved raw observations only after process status and source/runtime guards."""
+          import json
+          import math
+          import os
+          from pathlib import Path
+          
+          destination = Path(os.environ['NEW108_EVIDENCE'])
+          status = (destination/'before.status').read_text().strip()
+          print('NEW108_RECORDED_PROCESS_STATUS', status, flush=True)
+          if status != '0':
+              raise SystemExit('native process did not complete successfully; no defect qualification')
+          records = [json.loads(line.removeprefix('NEW108_RAW '))
+                     for line in (destination/'before.log').read_text().splitlines()
+                     if line.startswith('NEW108_RAW ')]
+          cases = ['unequal_1d', 'unequal_2d_F', 'unequal_2d_strided', 'unequal_reversed',
+                   'equal_complex', 'real_weights', 'no_weights', 'real_only']
+          expected_keys = {(case, method) for case in cases for method in ['leastsq', 'least_squares']}
+          if len(records) != len(expected_keys) or {(r['case'], r['method']) for r in records} != expected_keys:
+              raise SystemExit('missing or duplicated public fit records')
+          assessments = []
+          unexpected = []
+          for record in records:
+              assessment = {key: record[key] for key in ['case', 'method']}
+              if record['error'] is not None:
+                  assessment['runtime_error'] = record['error']
+                  unexpected.append(assessment)
+              else:
+                  close = lambda first, second: math.isclose(first, second, rel_tol=1e-7, abs_tol=1e-7)
+                  actual_residual = record['actual_residual']
+                  expected_residual = record['expected_residual']
+                  assessment.update(parameter_contract=close(record['actual_a'], record['expected_a']),
+                      residual_contract=len(actual_residual) == len(expected_residual) and
+                          all(close(a, e) for a, e in zip(actual_residual, expected_residual)),
+                      chisqr_contract=close(record['actual_chisqr'], record['expected_chisqr']),
+                      optimizer_success=record['success'], inputs_unchanged=record['inputs_unchanged'])
+                  unequal = record['case'].startswith('unequal_')
+                  expected_parameter_pass = True
+                  expected_residual_pass = True
+                  if (not record['success'] or not record['inputs_unchanged']
+                          or assessment['parameter_contract'] != expected_parameter_pass
+                          or assessment['residual_contract'] != expected_residual_pass
+                          or assessment['chisqr_contract'] != expected_residual_pass
+                          or (unequal and not close(record['actual_a'], record['expected_a']))):
+                      unexpected.append(assessment)
+              assessments.append(assessment)
+          print('NEW108_ASSESS', json.dumps({'cases': assessments, 'unexpected': unexpected,
+              'diagnostic_exit_zero_is_not_contract_success': True}), flush=True)
+          raise SystemExit(2 if unexpected else 0)
+          NEW119_PROBE_ASSESS_AFTER_PY
+          sha256sum "$NEW108_EVIDENCE/probe-assess-after.py"
+      - name: Stage exact reviewed candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/fix.patch" <<'NEW119_FIX_PATCH'
+          --- a/doc/model.rst
+          +++ b/doc/model.rst
+          @@ -686,6 +686,13 @@
+           **will always be coerced** to an 1-dimensional ndarray with dtype "float64"
+           when it is passed to the solver. If it cannot be coerced, an error will occur
+           and the fit will be aborted.
+          +
+          +For complex data or model output, real and imaginary residual components are
+          +handled separately. Real weights apply equally to both components. With
+          +complex weights, ``weights.real`` multiplies the real residual and
+          +``weights.imag`` multiplies the imaginary residual, rather than performing
+          +complex multiplication. For example, a residual ``1+2j`` with weight
+          +``3+4j`` contributes ``3**2 + 8**2`` to chi-square.
+           
+           That coercion will usually work for "array like" data that is not already a
+           float64 ndarray.  But, depending on the model function, the calculations within
+          --- a/doc/whatsnew.rst
+          +++ b/doc/whatsnew.rst
+          @@ -26,6 +26,8 @@
+           
+           Fixes:
+           
+          +- apply complex weights independently to real and imaginary model residuals,
+          +  restoring the documented weighted objective and fit statistics
+           - prevent log-normal evaluations from modifying input arrays and allow read-only
+             coordinate arrays
+           - avoid overflowing gamma factors in ``pearson7``, ``students_t``, and
+          --- a/lmfit/model.py
+          +++ b/lmfit/model.py
+          @@ -878,11 +878,8 @@
+                   real part of the weights are applied to the real part of the
+                   residual and the imaginary part is treated correspondingly.
+           
+          -        Since the underlying `scipy.optimize` routines expect
+          -        ``numpy.float`` arrays, the only complex type supported is
+          -        ``complex``.
+          -
+          -        The "ravels" throughout are necessary to support `pandas.Series`.
+          +        Complex residuals are converted to a one-dimensional array of
+          +        interleaved real and imaginary parts for `scipy.optimize`.
+           
+                   """
+                   model = self.eval(params, **kwargs)
+          @@ -895,16 +892,19 @@
+           
+                   diff = data - model
+           
+          -        if diff.dtype is complex:
+          -            # data/model are complex
+          -            diff = diff.ravel().view(float)
+          +        if np.iscomplexobj(diff):
+          +            diff = np.asarray(diff, dtype=complex)
+                       if weights is not None:
+          -                if weights.dtype is complex:
+          -                    # weights are complex
+          -                    weights = weights.ravel().view(float)
+          +                weights = np.asarray(weights)
+          +                if weights.size == diff.size:
+          +                    # Weights need the same size, not necessarily the same shape.
+          +                    weights = weights.reshape(diff.shape)
+          +                if np.iscomplexobj(weights):
+          +                    diff.real *= np.real(weights)
+          +                    diff.imag *= np.imag(weights)
+                           else:
+          -                    # real weights but complex data
+          -                    weights = (weights + 1j * weights).ravel().view(float)
+          +                    diff *= weights
+          +            return diff.ravel().view(float)
+                   if weights is not None:
+                       diff *= weights
+                   return diff
+          --- a/tests/test_model.py
+          +++ b/tests/test_model.py
+          @@ -469,6 +469,97 @@
+                   else:
+                       assert result.userkws['x'].dtype == expected_dtype
+                       assert result.userargs[0].dtype == expected_dtype
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_dtype', [np.complex64, np.complex128, '>c16'])
+          +@pytest.mark.parametrize('layout', ['C', 'F', 'strided', 'reversed'])
+          +def test_complex_model_weighted_fit(method, weight_dtype, layout):
+          +    """Complex weights minimize the independent quadrature objective."""
+          +    x = np.arange(1., 7.)
+          +    if layout in ('F', 'strided'):
+          +        x = x.reshape(2, 3)
+          +    data = 2j*x
+          +    weights = np.full(x.shape, 1+10j, dtype=weight_dtype)
+          +    if layout == 'F':
+          +        x, data, weights = (np.asfortranarray(arr) for arr in (x, data, weights))
+          +    elif layout == 'strided':
+          +        x, data, weights = (np.stack((arr, arr), axis=-1)[..., 0]
+          +                            for arr in (x, data, weights))
+          +    elif layout == 'reversed':
+          +        x, data, weights = (arr[::-1] for arr in (x, data, weights))
+          +    originals = [arr.copy() for arr in (x, data, weights)]
+          +    for arr in (x, data, weights):
+          +        arr.setflags(write=False)
+          +
+          +    def complex_model(x, a):
+          +        return a*(1+1j)*x
+          +
+          +    result = Model(complex_model).fit(data, x=x, a=0.5, weights=weights,
+          +                                      method=method)
+          +
+          +    # The objective is sum(x**2)*(a**2 + 100*(2-a)**2).
+          +    expected_a = 200/101
+          +    expected_residual = np.column_stack((-200*x.ravel()/101,
+          +                                         20*x.ravel()/101)).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7)
+          +    assert_allclose(result.chisqr, 400*np.sum(x*x)/101, rtol=1.e-7)
+          +    for original, actual in zip(originals, (x, data, weights)):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_kind', ['none', 'real', 'equal', 'scalar',
+          +                                         'list', 'broadcast', 'flat', 'real_only'])
+          +def test_complex_model_weight_controls(method, weight_kind):
+          +    """Weighting preserves ordinary fits and supported array-like inputs."""
+          +    x = np.arange(1., 7.).reshape(2, 3)
+          +    data = 2j*x
+          +    if weight_kind == 'none':
+          +        weights = None
+          +    elif weight_kind in ('real', 'real_only'):
+          +        weights = 1+0.1*x
+          +    elif weight_kind == 'equal':
+          +        weights = np.full(x.shape, 1+1j)
+          +    elif weight_kind == 'scalar':
+          +        weights = 1+10j
+          +    elif weight_kind == 'flat':
+          +        weights = np.full(x.size, 1+10j)
+          +    elif weight_kind == 'list':
+          +        weights = np.full(x.shape, 1+10j).tolist()
+          +    else:
+          +        weights = np.full((1, 3), 1+10j)
+          +    is_real = weight_kind == 'real_only'
+          +    if is_real:
+          +        data = 2*x+0.1*np.sin(x)
+          +    originals = [np.copy(arr) for arr in (x, data, weights)
+          +                 if arr is not None]
+          +
+          +    def model(x, a):
+          +        return a*x if is_real else a*(1+1j)*x
+          +
+          +    result = Model(model).fit(data, x=x, a=0.5, weights=weights, method=method)
+          +    expected_weights = weights
+          +    if weight_kind == 'flat':
+          +        expected_weights = weights.reshape(x.shape)
+          +    wr = 1 if weights is None else np.real(expected_weights)
+          +    wi = np.imag(expected_weights) if np.iscomplexobj(weights) else wr
+          +    if is_real:
+          +        expected_a = np.sum(wr**2*x*data)/np.sum(wr**2*x*x)
+          +        expected_residual = ((data-expected_a*x)*wr).ravel()
+          +    else:
+          +        expected_a = 200/101 if weight_kind in ('scalar', 'list', 'broadcast', 'flat') else 1
+          +        expected_residual = np.stack((-expected_a*x*wr,
+          +                                      (2-expected_a)*x*wi), axis=-1).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7, atol=1.e-7)
+          +    assert_allclose(result.chisqr, np.sum(expected_residual**2), rtol=1.e-7)
+          +    actuals = [np.asarray(arr) for arr in (x, data, weights) if arr is not None]
+          +    for original, actual in zip(originals, actuals):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+           
+           
+           def test_figure_default_title(peakdata):
+          NEW119_FIX_PATCH
+          sha256sum "$NEW108_EVIDENCE/fix.patch"
+      - name: Stage critical runtime provenance helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/critical-runtime-guard.py" <<'NEW119_CRITICAL_RUNTIME_GUARD_PY'
+          """Hosted-only critical runtime provenance, distinct from the complete ELF guard.
+          
+          This hashes explicit actual module/interpreter/solver/helper files. It does not
+          claim an entire environment or transitive loader closure for official suites.
+          """
+          import hashlib
+          import importlib
+          import importlib.metadata
+          import inspect
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+          import sysconfig
+          
+          import lmfit
+          import numpy as np
+          import scipy
+          from scipy.optimize import least_squares, leastsq
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          operation, label = sys.argv[1:3]
+          if operation not in ['baseline', 'check'] or label not in ['public16', 'focused40', 'full-suite', 'style-docs']:
+              raise RuntimeError('invalid critical provenance operation/label')
+          
+          
+          def sha256(path):
+              value = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      value.update(chunk)
+              return value.hexdigest()
+          
+          
+          files = {}
+          
+          
+          def add_file(path):
+              path = Path(path).resolve()
+              if not path.is_file():
+                  raise RuntimeError('critical runtime file missing: '+str(path))
+              files[str(path)] = {'bytes': path.stat().st_size, 'sha256': sha256(path)}
+              return str(path)
+          
+          
+          modules = {}
+          
+          
+          def add_module(module):
+              if getattr(module, '__file__', None):
+                  path = add_file(module.__file__)
+                  modules[module.__name__] = path
+                  if module.__name__ == 'lmfit' or module.__name__.startswith('lmfit.'):
+                      if not Path(path).is_relative_to(root):
+                          raise RuntimeError('critical lmfit module outside whole source: '+path)
+          
+          
+          for name in ['lmfit', 'lmfit.model', 'lmfit.minimizer', 'numpy', 'scipy',
+                       'numpy._core._multiarray_umath', 'numpy.linalg._umath_linalg',
+                       'scipy.optimize._minpack', 'scipy.optimize._lsq.trf',
+                       'pytest', '_pytest.runner', '_pytest.python', '_pytest.assertion.rewrite']:
+              add_module(importlib.import_module(name))
+          # Hash every actual lmfit source module, including the generated version module.
+          for path in sorted((root/'lmfit').glob('*.py')):
+              add_file(path)
+          
+          functions = {}
+          for name, function in [('scipy.optimize.leastsq', leastsq),
+                                 ('scipy.optimize.least_squares', least_squares)]:
+              module = importlib.import_module(function.__module__)
+              add_module(module)
+              source = inspect.getsourcefile(function)
+              if source is None:
+                  raise RuntimeError('solver has no inspectable source: '+name)
+              record = {'module': function.__module__, 'qualname': function.__qualname__,
+                        'source_file': add_file(source)}
+              if hasattr(function, '__code__'):
+                  record['function_code_sha256'] = hashlib.sha256(function.__code__.co_code).hexdigest()
+              functions[name] = record
+              # Follow the actual public solver's immediate numerical backend references.
+              for key in ['_minpack', 'trf', 'dogbox', 'call_minpack']:
+                  backend = getattr(function, '__globals__', {}).get(key)
+                  if inspect.ismodule(backend):
+                      add_module(backend)
+                  elif inspect.isfunction(backend):
+                      add_module(importlib.import_module(backend.__module__))
+          
+          helpers = {}
+          for name in ['probe-guard.py', 'critical-runtime-guard.py', 'fix.patch']:
+              path = destination/name
+              helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          if label in ['public16', 'focused40']:
+              for name in ['probe-before.py', 'probe-assess.py', 'probe-assess-after.py',
+                           'test_complex_weight_regressions.py']:
+                  path = destination/name
+                  helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          
+          interpreter = add_file(Path(sys.executable).resolve())
+          for module in [hashlib, importlib, inspect, json, platform, subprocess, sysconfig]:
+              add_module(module)
+          source = {name: subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+                    for name, args in [('head', ['rev-parse', 'HEAD']),
+                                       ('head_tree', ['rev-parse', 'HEAD^{tree}']),
+                                       ('index_tree', ['write-tree'])]}
+          data = {'scope': 'explicit actual source/module/solver/interpreter/helper files; not all runtime files or transitive linked libraries',
+                  'source': source, 'phase': os.environ['NEW119_PHASE'], 'label': label,
+                  'python': {'version': sys.version, 'implementation': platform.python_implementation(),
+                             'platform': platform.platform(), 'executable': interpreter,
+                             'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
+                             'stdlib': sysconfig.get_path('stdlib')},
+                  'versions': {name: importlib.metadata.version(name) for name in
+                               ['lmfit', 'numpy', 'scipy', 'asteval', 'uncertainties', 'dill', 'pytest']},
+                  'runtime_versions': {'lmfit': lmfit.__version__, 'numpy': np.__version__,
+                                       'scipy': scipy.__version__},
+                  'declared_generated_outputs': {
+                      'public16': ['runner-temporary raw observations/status/guard manifests'],
+                      'focused40': ['runner-temporary pytest log/JUnit/status/guard manifests',
+                                    'pytest .pytest_cache (excluded by the unchanged complete guard)'],
+                      'full-suite': ['coverage HTML and .coverage', 'pytest .pytest_cache',
+                                     'runner-temporary native logs/status/critical manifests',
+                                     'Windows doc/_build, doc/examples, examples/documentation, doc/extensions.py'],
+                      'style-docs': ['doc/_build, doc/examples, examples/documentation, doc/extensions.py',
+                                     'gallery execution data and timing reports',
+                                     'runner-temporary pre-commit environments, logs/status/critical manifests']
+                  }[label],
+                  'output_scope': 'Generated outputs are declared, not accepted as exceptions to tracked-source or critical-file checks; untracked outputs are outside this explicit-file snapshot.',
+                  'modules': dict(sorted(modules.items())), 'solvers': functions,
+                  'helpers': helpers, 'files': dict(sorted(files.items()))}
+          snapshot = destination/('critical-baseline-'+label+'.json')
+          if operation == 'baseline':
+              snapshot.write_text(json.dumps(data, sort_keys=True))
+          else:
+              before = json.loads(snapshot.read_text())
+              if before != data:
+                  print('NEW119_CRITICAL_CHANGED_FILES', json.dumps(sorted(
+                      name for name in set(before['files']) | set(data['files'])
+                      if before['files'].get(name) != data['files'].get(name))), flush=True)
+                  raise RuntimeError('critical runtime provenance changed during '+label)
+          print('NEW119_CRITICAL_RUNTIME', json.dumps({
+              'operation': operation, 'file_count': len(files),
+              'manifest_sha256': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+              'provenance': data, 'unchanged': operation == 'check'}, sort_keys=True), flush=True)
+          NEW119_CRITICAL_RUNTIME_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/critical-runtime-guard.py"
+      - name: Stage exact permanent fit tests outside target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/test_complex_weight_regressions.py" <<'NEW119_TEST_COMPLEX_WEIGHT_REGRESSIONS_PY'
+          import numpy as np
+          from numpy.testing import assert_allclose
+          import pytest
+          from lmfit import Model
+          @pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          @pytest.mark.parametrize('weight_dtype', [np.complex64, np.complex128, '>c16'])
+          @pytest.mark.parametrize('layout', ['C', 'F', 'strided', 'reversed'])
+          def test_complex_model_weighted_fit(method, weight_dtype, layout):
+              """Complex weights minimize the independent quadrature objective."""
+              x = np.arange(1., 7.)
+              if layout in ('F', 'strided'):
+                  x = x.reshape(2, 3)
+              data = 2j*x
+              weights = np.full(x.shape, 1+10j, dtype=weight_dtype)
+              if layout == 'F':
+                  x, data, weights = (np.asfortranarray(arr) for arr in (x, data, weights))
+              elif layout == 'strided':
+                  x, data, weights = (np.stack((arr, arr), axis=-1)[..., 0]
+                                      for arr in (x, data, weights))
+              elif layout == 'reversed':
+                  x, data, weights = (arr[::-1] for arr in (x, data, weights))
+              originals = [arr.copy() for arr in (x, data, weights)]
+              for arr in (x, data, weights):
+                  arr.setflags(write=False)
+          
+              def complex_model(x, a):
+                  return a*(1+1j)*x
+          
+              result = Model(complex_model).fit(data, x=x, a=0.5, weights=weights,
+                                                method=method)
+          
+              # The objective is sum(x**2)*(a**2 + 100*(2-a)**2).
+              expected_a = 200/101
+              expected_residual = np.column_stack((-200*x.ravel()/101,
+                                                   20*x.ravel()/101)).ravel()
+              assert result.success
+              assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+              assert_allclose(result.residual, expected_residual, rtol=1.e-7)
+              assert_allclose(result.chisqr, 400*np.sum(x*x)/101, rtol=1.e-7)
+              for original, actual in zip(originals, (x, data, weights)):
+                  np.testing.assert_array_equal(actual, original, strict=True)
+          
+          
+          @pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          @pytest.mark.parametrize('weight_kind', ['none', 'real', 'equal', 'scalar',
+                                                   'list', 'broadcast', 'flat', 'real_only'])
+          def test_complex_model_weight_controls(method, weight_kind):
+              """Weighting preserves ordinary fits and supported array-like inputs."""
+              x = np.arange(1., 7.).reshape(2, 3)
+              data = 2j*x
+              if weight_kind == 'none':
+                  weights = None
+              elif weight_kind in ('real', 'real_only'):
+                  weights = 1+0.1*x
+              elif weight_kind == 'equal':
+                  weights = np.full(x.shape, 1+1j)
+              elif weight_kind == 'scalar':
+                  weights = 1+10j
+              elif weight_kind == 'flat':
+                  weights = np.full(x.size, 1+10j)
+              elif weight_kind == 'list':
+                  weights = np.full(x.shape, 1+10j).tolist()
+              else:
+                  weights = np.full((1, 3), 1+10j)
+              is_real = weight_kind == 'real_only'
+              if is_real:
+                  data = 2*x+0.1*np.sin(x)
+              originals = [np.copy(arr) for arr in (x, data, weights)
+                           if arr is not None]
+          
+              def model(x, a):
+                  return a*x if is_real else a*(1+1j)*x
+          
+              result = Model(model).fit(data, x=x, a=0.5, weights=weights, method=method)
+              expected_weights = weights
+              if weight_kind == 'flat':
+                  expected_weights = weights.reshape(x.shape)
+              wr = 1 if weights is None else np.real(expected_weights)
+              wi = np.imag(expected_weights) if np.iscomplexobj(weights) else wr
+              if is_real:
+                  expected_a = np.sum(wr**2*x*data)/np.sum(wr**2*x*x)
+                  expected_residual = ((data-expected_a*x)*wr).ravel()
+              else:
+                  expected_a = 200/101 if weight_kind in ('scalar', 'list', 'broadcast', 'flat') else 1
+                  expected_residual = np.stack((-expected_a*x*wr,
+                                                (2-expected_a)*x*wi), axis=-1).ravel()
+              assert result.success
+              assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+              assert_allclose(result.residual, expected_residual, rtol=1.e-7, atol=1.e-7)
+              assert_allclose(result.chisqr, np.sum(expected_residual**2), rtol=1.e-7)
+              actuals = [np.asarray(arr) for arr in (x, data, weights) if arr is not None]
+              for original, actual in zip(originals, actuals):
+                  np.testing.assert_array_equal(actual, original, strict=True)
+          NEW119_TEST_COMPLEX_WEIGHT_REGRESSIONS_PY
+          sha256sum "$NEW108_EVIDENCE/test_complex_weight_regressions.py"
+      - name: Apply candidate only in after lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$NEW119_PHASE" == after ]]; then
+            git -C "$NEW108_SOURCE" apply --check --index "$NEW108_EVIDENCE/fix.patch"
+            git -C "$NEW108_SOURCE" apply --index "$NEW108_EVIDENCE/fix.patch"
+          fi
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+      - name: Install exact proven CPU runtime and whole target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/new119-venv"
+          echo "$RUNNER_TEMP/new119-venv/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/new119-venv/bin:$PATH"
+          python -m pip install pip==25.0.1 setuptools==77.0.3 setuptools-scm==8.2.0 wheel==0.45.1 packaging==24.2
+          python -m pip install numpy==2.0.0 scipy==1.14.0 asteval==1.0.0 uncertainties==3.2.2 dill==0.3.8 pytest==8.3.5
+          python -m pip install --no-deps --no-build-isolation -e "$NEW108_SOURCE"
+          python -m pip list
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" baseline public16
+          python "$NEW108_EVIDENCE/probe-guard.py" before public16
+      - name: Run unchanged 16 public fits and save actual process status
+        shell: bash
+        run: |
+          set +e
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/probe-before.py" 2>&1 | tee "$NEW108_EVIDENCE/before.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$NEW108_EVIDENCE/before.status"
+          echo "NEW119_PROCESS $NEW119_PHASE $status"
+          exit 0
+      - name: Verify source and consumed runtime before assessing observations
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$NEW108_EVIDENCE/probe-guard.py" after public16
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" check public16
+          if [[ "$NEW119_PHASE" == before ]]; then
+            python "$NEW108_EVIDENCE/probe-assess.py"
+          else
+            python "$NEW108_EVIDENCE/probe-assess-after.py"
+          fi
+      - name: Freeze complete runtime around exact permanent regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" baseline focused40
+          python "$NEW108_EVIDENCE/probe-guard.py" before focused40
+      - name: Run permanent regressions against lane source and save status
+        shell: bash
+        run: |
+          set +e
+          PYTHONPATH="$NEW108_SOURCE" python -m pytest -o addopts= -q "$NEW108_EVIDENCE/test_complex_weight_regressions.py" --junitxml="$NEW108_EVIDENCE/regression.xml" 2>&1 | tee "$NEW108_EVIDENCE/regression.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$NEW108_EVIDENCE/regression.status"
+          echo "NEW119_REGRESSION_PROCESS $NEW119_PHASE $status"
+          exit 0
+      - name: Verify full focused runtime before actual test outcome assessment
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$NEW108_EVIDENCE/probe-guard.py" after focused40
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" check focused40
+          python - <<'NEW119_REGRESSION_COUNTS'
+          import json
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          p = Path(os.environ['NEW108_EVIDENCE'])
+          status = int((p/'regression.status').read_text())
+          suites = ET.parse(p/'regression.xml').getroot().findall('testsuite')
+          counts = {key: sum(int(s.get(key, '0')) for s in suites)
+                    for key in ['tests', 'failures', 'errors', 'skipped']}
+          phase = os.environ['NEW119_PHASE']
+          print('NEW119_REGRESSION_COUNTS', json.dumps(dict(phase=phase, status=status, **counts)), flush=True)
+          expected_failed = 34 if phase == 'before' else 0
+          assert counts['tests'] == 40 and counts['failures']+counts['errors'] == expected_failed
+          assert counts['skipped'] == 0 and status == (1 if phase == 'before' else 0)
+          NEW119_REGRESSION_COUNTS
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, python: '3.10', dependencies: minimum}
+          - {os: ubuntu-24.04, python: '3.10', dependencies: latest}
+          - {os: ubuntu-24.04, python: '3.11', dependencies: latest}
+          - {os: ubuntu-24.04, python: '3.12', dependencies: latest}
+          - {os: ubuntu-24.04, python: '3.13', dependencies: latest}
+          - {os: ubuntu-24.04, python: '3.14', dependencies: latest}
+          - {os: windows-latest, python: '3.14', dependencies: latest}
+          - {os: macos-latest, python: '3.14', dependencies: latest}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      NEW119_PHASE: after
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MPLBACKEND: Agg
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Checkout whole exact upstream source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: lmfit/lmfit-py
+          ref: 3a2439c2061ddeaf4cca8f99eb70a069e6a51a41
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Python without cache
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Stage reviewed source and runtime guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NEW108_SOURCE="$GITHUB_WORKSPACE/target"
+          export NEW108_EVIDENCE="$RUNNER_TEMP/new119-evidence"
+          mkdir -p "$NEW108_EVIDENCE"
+          echo "NEW108_SOURCE=$NEW108_SOURCE" >> "$GITHUB_ENV"
+          echo "NEW108_EVIDENCE=$NEW108_EVIDENCE" >> "$GITHUB_ENV"
+          cat > "$NEW108_EVIDENCE/probe-guard.py" <<'NEW119_PROBE_GUARD_PY'
+          """Unexecuted hosted-runner provenance proposal; no target imports."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import sysconfig
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          stage = sys.argv[1]
+          snapshot_label = sys.argv[2] if len(sys.argv) > 2 else 'public16'
+          if snapshot_label not in ['public16', 'focused40']:
+              raise RuntimeError('invalid full-runtime snapshot label')
+          expected_head = '3a2439c2061ddeaf4cca8f99eb70a069e6a51a41'
+          expected_tree = '0f9806e9012d23735d055fc0b4f647212e44c180'
+          expected_index_tree = expected_tree
+          expected_status = ''
+          if os.environ.get('NEW119_PHASE') == 'after':
+              expected_index_tree = 'cc96366bdd5d7ee3e1fd8695ba24a677daf96d22'
+              expected_status = 'M  doc/model.rst\nM  doc/whatsnew.rst\nM  lmfit/model.py\nM  tests/test_model.py\n'
+          
+          
+          
+          def git(*arguments):
+              return subprocess.check_output(['git', '-C', str(root), *arguments])
+          
+          
+          def file_record(path):
+              info = path.lstat()
+              if stat.S_ISLNK(info.st_mode):
+                  return {'type': 'symlink', 'target': os.readlink(path)}
+              if not stat.S_ISREG(info.st_mode):
+                  raise RuntimeError('unexpected runtime entry type: '+str(path))
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      digest.update(chunk)
+              return {'type': 'file', 'size': info.st_size, 'mode': info.st_mode & 0o777,
+                      'sha256': digest.hexdigest()}
+          
+          
+          def collect(parent, output):
+              if parent.is_file() or parent.is_symlink():
+                  output[str(parent)] = file_record(parent)
+                  return
+              for current, directories, filenames in os.walk(parent, followlinks=False):
+                  directories[:] = [name for name in directories if name not in
+                                     ['.git', '__pycache__', '.pytest_cache', '.mypy_cache']]
+                  for name in list(directories):
+                      path = Path(current)/name
+                      if path.is_symlink():
+                          output[str(path)] = file_record(path)
+                          directories.remove(name)
+                  for name in filenames:
+                      if not name.endswith(('.pyc', '.pyo')):
+                          path = Path(current)/name
+                          output[str(path)] = file_record(path)
+          
+          
+          index = git('ls-files', '--stage', '-z')
+          tracked = {}
+          for record in index.split(b'\0'):
+              if not record:
+                  continue
+              header, encoded_name = record.split(b'\t', 1)
+              mode, oid, index_stage = header.split()
+              if index_stage != b'0':
+                  raise RuntimeError('unmerged index stage')
+              name = os.fsdecode(encoded_name)
+              path = root/name
+              info = path.lstat()
+              if mode == b'120000':
+                  if not stat.S_ISLNK(info.st_mode):
+                      raise RuntimeError('tracked symlink type changed: '+name)
+                  raw = os.fsencode(os.readlink(path))
+              elif mode in [b'100644', b'100755']:
+                  if not stat.S_ISREG(info.st_mode):
+                      raise RuntimeError('tracked regular file type changed: '+name)
+                  actual_mode = mode if os.name == 'nt' else (b'100755' if info.st_mode & 0o111 else b'100644')
+                  if actual_mode != mode:
+                      raise RuntimeError('tracked executable mode changed: '+name)
+                  descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                  with os.fdopen(descriptor, 'rb') as stream:
+                      raw = stream.read()
+              else:
+                  raise RuntimeError('unsupported tracked Git mode: '+mode.decode())
+              actual_blob = hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+              if actual_blob != oid.decode():
+                  raise RuntimeError('actual tracked blob differs from index: '+name)
+              tracked[name] = {'index_mode': mode.decode(), 'index_blob': oid.decode(),
+                               'actual_blob': actual_blob, 'file': file_record(path)}
+          source = {
+              'head': git('rev-parse', 'HEAD').decode().strip(),
+              'tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+              'index_tree': git('write-tree').decode().strip(),
+              'index_sha256': hashlib.sha256(index).hexdigest(),
+              'tracked': tracked,
+              'tracked_status': git('status', '--porcelain', '--untracked-files=no').decode(),
+          }
+          if (source['head'] != expected_head or source['tree'] != expected_tree
+                  or source['index_tree'] != expected_index_tree
+                  or source['tracked_status'] != expected_status):
+              raise RuntimeError('whole source does not match reviewed base/candidate commit/tree/index')
+          data = {'source': source}
+          if stage != 'source':
+              consumed = {}
+              for parent in [root, Path(sys.prefix), Path(sysconfig.get_path('stdlib')),
+                             Path(sys.executable).resolve(), destination/'probe-before.py',
+                             destination/'probe-guard.py', destination/'probe-assess.py',
+                             destination/'probe-assess-after.py', destination/'fix.patch',
+                             destination/'test_complex_weight_regressions.py',
+                             destination/'critical-runtime-guard.py']:
+                  collect(parent, consumed)
+              for command in ['git', 'ldd', 'nm']:
+                  executable = shutil.which(command)
+                  if executable is None:
+                      raise RuntimeError('missing guard tool: '+command)
+                  collect(Path(executable).resolve(), consumed)
+              binaries = [Path(sys.executable).resolve()]
+              extension_symbols = {}
+              for name, item in consumed.items():
+                  if item['type'] != 'file' or not (name.endswith('.so') or '.so.' in name):
+                      continue
+                  process = subprocess.run(['nm', '-D', '--defined-only', name],
+                                           capture_output=True, text=True)
+                  if process.returncode != 0:
+                      raise RuntimeError('ELF export scan failed: '+name+' '+process.stderr)
+                  symbols = sorted(line.split()[-1] for line in process.stdout.splitlines()
+                                   if line.split() and line.split()[-1].startswith('PyInit_'))
+                  if symbols:
+                      extension_symbols[name] = symbols
+                      binaries.append(Path(name))
+              linked = {}
+              for binary in sorted(set(binaries)):
+                  process = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
+                  if process.returncode not in [0, 1]:
+                      raise RuntimeError('ELF dependency scan failed: '+str(binary))
+                  if 'not found' in process.stdout:
+                      raise RuntimeError('ELF dependency missing: '+str(binary)+' '+process.stdout)
+                  for word in process.stdout.split():
+                      if word.startswith('/') and Path(word).is_file():
+                          path = Path(word).resolve()
+                          linked[str(path)] = file_record(path)
+              data.update(consumed=consumed, linked=linked, extension_symbols=extension_symbols,
+                          elf_roots=sorted(str(binary) for binary in set(binaries)),
+                          executable=str(Path(sys.executable).resolve()),
+                          prefix=sys.prefix, base_prefix=sys.base_prefix)
+          if stage == 'source':
+              (destination/'guard-source.json').write_text(json.dumps(data, sort_keys=True))
+          else:
+              original = json.loads((destination/'guard-source.json').read_text())
+              if original['source'] != source:
+                  raise RuntimeError('original tracked source changed during install/probe')
+              if stage == 'before':
+                  (destination/('guard-before-'+snapshot_label+'.json')).write_text(json.dumps(data, sort_keys=True))
+              elif stage == 'after':
+                  before = json.loads((destination/('guard-before-'+snapshot_label+'.json')).read_text())
+                  if before != data:
+                      for key in ['consumed', 'linked']:
+                          print('NEW108_CHANGED', key, [name for name in
+                              set(before.get(key, {})) | set(data.get(key, {}))
+                              if before.get(key, {}).get(name) != data.get(key, {}).get(name)], flush=True)
+                      raise RuntimeError('consumed source/build/dependency/runtime guard changed')
+              else:
+                  raise RuntimeError('invalid guard stage')
+          print('NEW108_GUARD', json.dumps({
+              'stage': stage, 'snapshot_label': snapshot_label,
+              'phase': os.environ.get('NEW119_PHASE'), 'head': source['head'], 'tree': source['tree'],
+              'index_tree': source['index_tree'], 'index_sha256': source['index_sha256'],
+              'tracked_count': len(tracked), 'all_actual_git_blobs_match': True,
+              'filesystem_tracks_executable_mode': os.name != 'nt',
+              'tracked_sha256': hashlib.sha256(json.dumps(tracked, sort_keys=True).encode()).hexdigest(),
+              'consumed_count': len(data.get('consumed', {})),
+              'consumed_sha256': hashlib.sha256(json.dumps(data.get('consumed', {}), sort_keys=True).encode()).hexdigest(),
+              'linked_count': len(data.get('linked', {})),
+              'elf_root_count': len(data.get('elf_roots', [])),
+              'extension_root_count': len(data.get('extension_symbols', {})), 'unchanged': True,
+          }), flush=True)
+          NEW119_PROBE_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/probe-guard.py"
+      - name: Stage critical runtime provenance helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/critical-runtime-guard.py" <<'NEW119_CRITICAL_RUNTIME_GUARD_PY'
+          """Hosted-only critical runtime provenance, distinct from the complete ELF guard.
+          
+          This hashes explicit actual module/interpreter/solver/helper files. It does not
+          claim an entire environment or transitive loader closure for official suites.
+          """
+          import hashlib
+          import importlib
+          import importlib.metadata
+          import inspect
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+          import sysconfig
+          
+          import lmfit
+          import numpy as np
+          import scipy
+          from scipy.optimize import least_squares, leastsq
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          operation, label = sys.argv[1:3]
+          if operation not in ['baseline', 'check'] or label not in ['public16', 'focused40', 'full-suite', 'style-docs']:
+              raise RuntimeError('invalid critical provenance operation/label')
+          
+          
+          def sha256(path):
+              value = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      value.update(chunk)
+              return value.hexdigest()
+          
+          
+          files = {}
+          
+          
+          def add_file(path):
+              path = Path(path).resolve()
+              if not path.is_file():
+                  raise RuntimeError('critical runtime file missing: '+str(path))
+              files[str(path)] = {'bytes': path.stat().st_size, 'sha256': sha256(path)}
+              return str(path)
+          
+          
+          modules = {}
+          
+          
+          def add_module(module):
+              if getattr(module, '__file__', None):
+                  path = add_file(module.__file__)
+                  modules[module.__name__] = path
+                  if module.__name__ == 'lmfit' or module.__name__.startswith('lmfit.'):
+                      if not Path(path).is_relative_to(root):
+                          raise RuntimeError('critical lmfit module outside whole source: '+path)
+          
+          
+          for name in ['lmfit', 'lmfit.model', 'lmfit.minimizer', 'numpy', 'scipy',
+                       'numpy._core._multiarray_umath', 'numpy.linalg._umath_linalg',
+                       'scipy.optimize._minpack', 'scipy.optimize._lsq.trf',
+                       'pytest', '_pytest.runner', '_pytest.python', '_pytest.assertion.rewrite']:
+              add_module(importlib.import_module(name))
+          # Hash every actual lmfit source module, including the generated version module.
+          for path in sorted((root/'lmfit').glob('*.py')):
+              add_file(path)
+          
+          functions = {}
+          for name, function in [('scipy.optimize.leastsq', leastsq),
+                                 ('scipy.optimize.least_squares', least_squares)]:
+              module = importlib.import_module(function.__module__)
+              add_module(module)
+              source = inspect.getsourcefile(function)
+              if source is None:
+                  raise RuntimeError('solver has no inspectable source: '+name)
+              record = {'module': function.__module__, 'qualname': function.__qualname__,
+                        'source_file': add_file(source)}
+              if hasattr(function, '__code__'):
+                  record['function_code_sha256'] = hashlib.sha256(function.__code__.co_code).hexdigest()
+              functions[name] = record
+              # Follow the actual public solver's immediate numerical backend references.
+              for key in ['_minpack', 'trf', 'dogbox', 'call_minpack']:
+                  backend = getattr(function, '__globals__', {}).get(key)
+                  if inspect.ismodule(backend):
+                      add_module(backend)
+                  elif inspect.isfunction(backend):
+                      add_module(importlib.import_module(backend.__module__))
+          
+          helpers = {}
+          for name in ['probe-guard.py', 'critical-runtime-guard.py', 'fix.patch']:
+              path = destination/name
+              helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          if label in ['public16', 'focused40']:
+              for name in ['probe-before.py', 'probe-assess.py', 'probe-assess-after.py',
+                           'test_complex_weight_regressions.py']:
+                  path = destination/name
+                  helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          
+          interpreter = add_file(Path(sys.executable).resolve())
+          for module in [hashlib, importlib, inspect, json, platform, subprocess, sysconfig]:
+              add_module(module)
+          source = {name: subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+                    for name, args in [('head', ['rev-parse', 'HEAD']),
+                                       ('head_tree', ['rev-parse', 'HEAD^{tree}']),
+                                       ('index_tree', ['write-tree'])]}
+          data = {'scope': 'explicit actual source/module/solver/interpreter/helper files; not all runtime files or transitive linked libraries',
+                  'source': source, 'phase': os.environ['NEW119_PHASE'], 'label': label,
+                  'python': {'version': sys.version, 'implementation': platform.python_implementation(),
+                             'platform': platform.platform(), 'executable': interpreter,
+                             'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
+                             'stdlib': sysconfig.get_path('stdlib')},
+                  'versions': {name: importlib.metadata.version(name) for name in
+                               ['lmfit', 'numpy', 'scipy', 'asteval', 'uncertainties', 'dill', 'pytest']},
+                  'runtime_versions': {'lmfit': lmfit.__version__, 'numpy': np.__version__,
+                                       'scipy': scipy.__version__},
+                  'declared_generated_outputs': {
+                      'public16': ['runner-temporary raw observations/status/guard manifests'],
+                      'focused40': ['runner-temporary pytest log/JUnit/status/guard manifests',
+                                    'pytest .pytest_cache (excluded by the unchanged complete guard)'],
+                      'full-suite': ['coverage HTML and .coverage', 'pytest .pytest_cache',
+                                     'runner-temporary native logs/status/critical manifests',
+                                     'Windows doc/_build, doc/examples, examples/documentation, doc/extensions.py'],
+                      'style-docs': ['doc/_build, doc/examples, examples/documentation, doc/extensions.py',
+                                     'gallery execution data and timing reports',
+                                     'runner-temporary pre-commit environments, logs/status/critical manifests']
+                  }[label],
+                  'output_scope': 'Generated outputs are declared, not accepted as exceptions to tracked-source or critical-file checks; untracked outputs are outside this explicit-file snapshot.',
+                  'modules': dict(sorted(modules.items())), 'solvers': functions,
+                  'helpers': helpers, 'files': dict(sorted(files.items()))}
+          snapshot = destination/('critical-baseline-'+label+'.json')
+          if operation == 'baseline':
+              snapshot.write_text(json.dumps(data, sort_keys=True))
+          else:
+              before = json.loads(snapshot.read_text())
+              if before != data:
+                  print('NEW119_CRITICAL_CHANGED_FILES', json.dumps(sorted(
+                      name for name in set(before['files']) | set(data['files'])
+                      if before['files'].get(name) != data['files'].get(name))), flush=True)
+                  raise RuntimeError('critical runtime provenance changed during '+label)
+          print('NEW119_CRITICAL_RUNTIME', json.dumps({
+              'operation': operation, 'file_count': len(files),
+              'manifest_sha256': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+              'provenance': data, 'unchanged': operation == 'check'}, sort_keys=True), flush=True)
+          NEW119_CRITICAL_RUNTIME_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/critical-runtime-guard.py"
+      - name: Stage exact candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/fix.patch" <<'NEW119_FIX_PATCH'
+          --- a/doc/model.rst
+          +++ b/doc/model.rst
+          @@ -686,6 +686,13 @@
+           **will always be coerced** to an 1-dimensional ndarray with dtype "float64"
+           when it is passed to the solver. If it cannot be coerced, an error will occur
+           and the fit will be aborted.
+          +
+          +For complex data or model output, real and imaginary residual components are
+          +handled separately. Real weights apply equally to both components. With
+          +complex weights, ``weights.real`` multiplies the real residual and
+          +``weights.imag`` multiplies the imaginary residual, rather than performing
+          +complex multiplication. For example, a residual ``1+2j`` with weight
+          +``3+4j`` contributes ``3**2 + 8**2`` to chi-square.
+           
+           That coercion will usually work for "array like" data that is not already a
+           float64 ndarray.  But, depending on the model function, the calculations within
+          --- a/doc/whatsnew.rst
+          +++ b/doc/whatsnew.rst
+          @@ -26,6 +26,8 @@
+           
+           Fixes:
+           
+          +- apply complex weights independently to real and imaginary model residuals,
+          +  restoring the documented weighted objective and fit statistics
+           - prevent log-normal evaluations from modifying input arrays and allow read-only
+             coordinate arrays
+           - avoid overflowing gamma factors in ``pearson7``, ``students_t``, and
+          --- a/lmfit/model.py
+          +++ b/lmfit/model.py
+          @@ -878,11 +878,8 @@
+                   real part of the weights are applied to the real part of the
+                   residual and the imaginary part is treated correspondingly.
+           
+          -        Since the underlying `scipy.optimize` routines expect
+          -        ``numpy.float`` arrays, the only complex type supported is
+          -        ``complex``.
+          -
+          -        The "ravels" throughout are necessary to support `pandas.Series`.
+          +        Complex residuals are converted to a one-dimensional array of
+          +        interleaved real and imaginary parts for `scipy.optimize`.
+           
+                   """
+                   model = self.eval(params, **kwargs)
+          @@ -895,16 +892,19 @@
+           
+                   diff = data - model
+           
+          -        if diff.dtype is complex:
+          -            # data/model are complex
+          -            diff = diff.ravel().view(float)
+          +        if np.iscomplexobj(diff):
+          +            diff = np.asarray(diff, dtype=complex)
+                       if weights is not None:
+          -                if weights.dtype is complex:
+          -                    # weights are complex
+          -                    weights = weights.ravel().view(float)
+          +                weights = np.asarray(weights)
+          +                if weights.size == diff.size:
+          +                    # Weights need the same size, not necessarily the same shape.
+          +                    weights = weights.reshape(diff.shape)
+          +                if np.iscomplexobj(weights):
+          +                    diff.real *= np.real(weights)
+          +                    diff.imag *= np.imag(weights)
+                           else:
+          -                    # real weights but complex data
+          -                    weights = (weights + 1j * weights).ravel().view(float)
+          +                    diff *= weights
+          +            return diff.ravel().view(float)
+                   if weights is not None:
+                       diff *= weights
+                   return diff
+          --- a/tests/test_model.py
+          +++ b/tests/test_model.py
+          @@ -469,6 +469,97 @@
+                   else:
+                       assert result.userkws['x'].dtype == expected_dtype
+                       assert result.userargs[0].dtype == expected_dtype
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_dtype', [np.complex64, np.complex128, '>c16'])
+          +@pytest.mark.parametrize('layout', ['C', 'F', 'strided', 'reversed'])
+          +def test_complex_model_weighted_fit(method, weight_dtype, layout):
+          +    """Complex weights minimize the independent quadrature objective."""
+          +    x = np.arange(1., 7.)
+          +    if layout in ('F', 'strided'):
+          +        x = x.reshape(2, 3)
+          +    data = 2j*x
+          +    weights = np.full(x.shape, 1+10j, dtype=weight_dtype)
+          +    if layout == 'F':
+          +        x, data, weights = (np.asfortranarray(arr) for arr in (x, data, weights))
+          +    elif layout == 'strided':
+          +        x, data, weights = (np.stack((arr, arr), axis=-1)[..., 0]
+          +                            for arr in (x, data, weights))
+          +    elif layout == 'reversed':
+          +        x, data, weights = (arr[::-1] for arr in (x, data, weights))
+          +    originals = [arr.copy() for arr in (x, data, weights)]
+          +    for arr in (x, data, weights):
+          +        arr.setflags(write=False)
+          +
+          +    def complex_model(x, a):
+          +        return a*(1+1j)*x
+          +
+          +    result = Model(complex_model).fit(data, x=x, a=0.5, weights=weights,
+          +                                      method=method)
+          +
+          +    # The objective is sum(x**2)*(a**2 + 100*(2-a)**2).
+          +    expected_a = 200/101
+          +    expected_residual = np.column_stack((-200*x.ravel()/101,
+          +                                         20*x.ravel()/101)).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7)
+          +    assert_allclose(result.chisqr, 400*np.sum(x*x)/101, rtol=1.e-7)
+          +    for original, actual in zip(originals, (x, data, weights)):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_kind', ['none', 'real', 'equal', 'scalar',
+          +                                         'list', 'broadcast', 'flat', 'real_only'])
+          +def test_complex_model_weight_controls(method, weight_kind):
+          +    """Weighting preserves ordinary fits and supported array-like inputs."""
+          +    x = np.arange(1., 7.).reshape(2, 3)
+          +    data = 2j*x
+          +    if weight_kind == 'none':
+          +        weights = None
+          +    elif weight_kind in ('real', 'real_only'):
+          +        weights = 1+0.1*x
+          +    elif weight_kind == 'equal':
+          +        weights = np.full(x.shape, 1+1j)
+          +    elif weight_kind == 'scalar':
+          +        weights = 1+10j
+          +    elif weight_kind == 'flat':
+          +        weights = np.full(x.size, 1+10j)
+          +    elif weight_kind == 'list':
+          +        weights = np.full(x.shape, 1+10j).tolist()
+          +    else:
+          +        weights = np.full((1, 3), 1+10j)
+          +    is_real = weight_kind == 'real_only'
+          +    if is_real:
+          +        data = 2*x+0.1*np.sin(x)
+          +    originals = [np.copy(arr) for arr in (x, data, weights)
+          +                 if arr is not None]
+          +
+          +    def model(x, a):
+          +        return a*x if is_real else a*(1+1j)*x
+          +
+          +    result = Model(model).fit(data, x=x, a=0.5, weights=weights, method=method)
+          +    expected_weights = weights
+          +    if weight_kind == 'flat':
+          +        expected_weights = weights.reshape(x.shape)
+          +    wr = 1 if weights is None else np.real(expected_weights)
+          +    wi = np.imag(expected_weights) if np.iscomplexobj(weights) else wr
+          +    if is_real:
+          +        expected_a = np.sum(wr**2*x*data)/np.sum(wr**2*x*x)
+          +        expected_residual = ((data-expected_a*x)*wr).ravel()
+          +    else:
+          +        expected_a = 200/101 if weight_kind in ('scalar', 'list', 'broadcast', 'flat') else 1
+          +        expected_residual = np.stack((-expected_a*x*wr,
+          +                                      (2-expected_a)*x*wi), axis=-1).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7, atol=1.e-7)
+          +    assert_allclose(result.chisqr, np.sum(expected_residual**2), rtol=1.e-7)
+          +    actuals = [np.asarray(arr) for arr in (x, data, weights) if arr is not None]
+          +    for original, actual in zip(originals, actuals):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+           
+           
+           def test_figure_default_title(peakdata):
+          NEW119_FIX_PATCH
+          sha256sum "$NEW108_EVIDENCE/fix.patch"
+      - name: Apply only reviewed candidate and freeze complete source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$NEW108_SOURCE" apply --check --index "$NEW108_EVIDENCE/fix.patch"
+          git -C "$NEW108_SOURCE" apply --index "$NEW108_EVIDENCE/fix.patch"
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+      - name: Build distributions and install project dependencies
+        working-directory: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build setuptools wheel
+          if [[ '${{ matrix.dependencies }}' == minimum ]]; then
+            python -m pip install asteval==1.0.0 numpy==2.0.0 scipy==1.14.0 uncertainties==3.2.2 dill==0.3.8
+            python -m build
+            python -m pip install --no-build-isolation '.[test]'
+          else
+            python -m build
+            python -m pip install --no-build-isolation '.[all]'
+          fi
+          python -m pip list
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" baseline full-suite
+      - name: Run full applicable official pytest suite with coverage
+        working-directory: target
+        shell: bash
+        run: |
+          set +e
+          python -m pytest 2>&1 | tee "$RUNNER_TEMP/new119-full-pytest.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/new119-full-pytest.status"
+          echo "NEW119_FULL_PYTEST_PROCESS $status"
+          exit 0
+      - name: Build official Windows HTML documentation and save status
+        if: runner.os == 'Windows'
+        working-directory: target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Push-Location doc
+          & .\make.bat html 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/new119-windows-docs.log"
+          $status = $LASTEXITCODE
+          Pop-Location
+          Set-Content -Path "$env:RUNNER_TEMP/new119-windows-docs.status" -Value $status
+          Write-Output "NEW119_WINDOWS_DOCS_PROCESS $status"
+          exit 0
+      - name: Verify exact candidate and enforce saved full-suite result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" check full-suite
+          python - <<'NEW119_FULL_SUITE_STATUSES'
+          import json
+          import os
+          from pathlib import Path
+          p = Path(os.environ['RUNNER_TEMP'])
+          statuses = {'pytest': int((p/'new119-full-pytest.status').read_text())}
+          if os.environ['RUNNER_OS'] == 'Windows':
+              statuses['windows_html_docs'] = int((p/'new119-windows-docs.status').read_text(encoding='utf-8-sig'))
+          print('NEW119_FULL_SUITE_RECORDED_STATUSES', json.dumps(statuses), flush=True)
+          raise SystemExit(1 if any(statuses.values()) else 0)
+          NEW119_FULL_SUITE_STATUSES
+  style-build-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NEW119_PHASE: after
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MPLBACKEND: Agg
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Checkout whole exact upstream source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: lmfit/lmfit-py
+          ref: 3a2439c2061ddeaf4cca8f99eb70a069e6a51a41
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Python without cache
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14'
+      - name: Stage reviewed source and runtime guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NEW108_SOURCE="$GITHUB_WORKSPACE/target"
+          export NEW108_EVIDENCE="$RUNNER_TEMP/new119-evidence"
+          mkdir -p "$NEW108_EVIDENCE"
+          echo "NEW108_SOURCE=$NEW108_SOURCE" >> "$GITHUB_ENV"
+          echo "NEW108_EVIDENCE=$NEW108_EVIDENCE" >> "$GITHUB_ENV"
+          cat > "$NEW108_EVIDENCE/probe-guard.py" <<'NEW119_PROBE_GUARD_PY'
+          """Unexecuted hosted-runner provenance proposal; no target imports."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import sysconfig
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          stage = sys.argv[1]
+          snapshot_label = sys.argv[2] if len(sys.argv) > 2 else 'public16'
+          if snapshot_label not in ['public16', 'focused40']:
+              raise RuntimeError('invalid full-runtime snapshot label')
+          expected_head = '3a2439c2061ddeaf4cca8f99eb70a069e6a51a41'
+          expected_tree = '0f9806e9012d23735d055fc0b4f647212e44c180'
+          expected_index_tree = expected_tree
+          expected_status = ''
+          if os.environ.get('NEW119_PHASE') == 'after':
+              expected_index_tree = 'cc96366bdd5d7ee3e1fd8695ba24a677daf96d22'
+              expected_status = 'M  doc/model.rst\nM  doc/whatsnew.rst\nM  lmfit/model.py\nM  tests/test_model.py\n'
+          
+          
+          
+          def git(*arguments):
+              return subprocess.check_output(['git', '-C', str(root), *arguments])
+          
+          
+          def file_record(path):
+              info = path.lstat()
+              if stat.S_ISLNK(info.st_mode):
+                  return {'type': 'symlink', 'target': os.readlink(path)}
+              if not stat.S_ISREG(info.st_mode):
+                  raise RuntimeError('unexpected runtime entry type: '+str(path))
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      digest.update(chunk)
+              return {'type': 'file', 'size': info.st_size, 'mode': info.st_mode & 0o777,
+                      'sha256': digest.hexdigest()}
+          
+          
+          def collect(parent, output):
+              if parent.is_file() or parent.is_symlink():
+                  output[str(parent)] = file_record(parent)
+                  return
+              for current, directories, filenames in os.walk(parent, followlinks=False):
+                  directories[:] = [name for name in directories if name not in
+                                     ['.git', '__pycache__', '.pytest_cache', '.mypy_cache']]
+                  for name in list(directories):
+                      path = Path(current)/name
+                      if path.is_symlink():
+                          output[str(path)] = file_record(path)
+                          directories.remove(name)
+                  for name in filenames:
+                      if not name.endswith(('.pyc', '.pyo')):
+                          path = Path(current)/name
+                          output[str(path)] = file_record(path)
+          
+          
+          index = git('ls-files', '--stage', '-z')
+          tracked = {}
+          for record in index.split(b'\0'):
+              if not record:
+                  continue
+              header, encoded_name = record.split(b'\t', 1)
+              mode, oid, index_stage = header.split()
+              if index_stage != b'0':
+                  raise RuntimeError('unmerged index stage')
+              name = os.fsdecode(encoded_name)
+              path = root/name
+              info = path.lstat()
+              if mode == b'120000':
+                  if not stat.S_ISLNK(info.st_mode):
+                      raise RuntimeError('tracked symlink type changed: '+name)
+                  raw = os.fsencode(os.readlink(path))
+              elif mode in [b'100644', b'100755']:
+                  if not stat.S_ISREG(info.st_mode):
+                      raise RuntimeError('tracked regular file type changed: '+name)
+                  actual_mode = mode if os.name == 'nt' else (b'100755' if info.st_mode & 0o111 else b'100644')
+                  if actual_mode != mode:
+                      raise RuntimeError('tracked executable mode changed: '+name)
+                  descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                  with os.fdopen(descriptor, 'rb') as stream:
+                      raw = stream.read()
+              else:
+                  raise RuntimeError('unsupported tracked Git mode: '+mode.decode())
+              actual_blob = hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+              if actual_blob != oid.decode():
+                  raise RuntimeError('actual tracked blob differs from index: '+name)
+              tracked[name] = {'index_mode': mode.decode(), 'index_blob': oid.decode(),
+                               'actual_blob': actual_blob, 'file': file_record(path)}
+          source = {
+              'head': git('rev-parse', 'HEAD').decode().strip(),
+              'tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+              'index_tree': git('write-tree').decode().strip(),
+              'index_sha256': hashlib.sha256(index).hexdigest(),
+              'tracked': tracked,
+              'tracked_status': git('status', '--porcelain', '--untracked-files=no').decode(),
+          }
+          if (source['head'] != expected_head or source['tree'] != expected_tree
+                  or source['index_tree'] != expected_index_tree
+                  or source['tracked_status'] != expected_status):
+              raise RuntimeError('whole source does not match reviewed base/candidate commit/tree/index')
+          data = {'source': source}
+          if stage != 'source':
+              consumed = {}
+              for parent in [root, Path(sys.prefix), Path(sysconfig.get_path('stdlib')),
+                             Path(sys.executable).resolve(), destination/'probe-before.py',
+                             destination/'probe-guard.py', destination/'probe-assess.py',
+                             destination/'probe-assess-after.py', destination/'fix.patch',
+                             destination/'test_complex_weight_regressions.py',
+                             destination/'critical-runtime-guard.py']:
+                  collect(parent, consumed)
+              for command in ['git', 'ldd', 'nm']:
+                  executable = shutil.which(command)
+                  if executable is None:
+                      raise RuntimeError('missing guard tool: '+command)
+                  collect(Path(executable).resolve(), consumed)
+              binaries = [Path(sys.executable).resolve()]
+              extension_symbols = {}
+              for name, item in consumed.items():
+                  if item['type'] != 'file' or not (name.endswith('.so') or '.so.' in name):
+                      continue
+                  process = subprocess.run(['nm', '-D', '--defined-only', name],
+                                           capture_output=True, text=True)
+                  if process.returncode != 0:
+                      raise RuntimeError('ELF export scan failed: '+name+' '+process.stderr)
+                  symbols = sorted(line.split()[-1] for line in process.stdout.splitlines()
+                                   if line.split() and line.split()[-1].startswith('PyInit_'))
+                  if symbols:
+                      extension_symbols[name] = symbols
+                      binaries.append(Path(name))
+              linked = {}
+              for binary in sorted(set(binaries)):
+                  process = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
+                  if process.returncode not in [0, 1]:
+                      raise RuntimeError('ELF dependency scan failed: '+str(binary))
+                  if 'not found' in process.stdout:
+                      raise RuntimeError('ELF dependency missing: '+str(binary)+' '+process.stdout)
+                  for word in process.stdout.split():
+                      if word.startswith('/') and Path(word).is_file():
+                          path = Path(word).resolve()
+                          linked[str(path)] = file_record(path)
+              data.update(consumed=consumed, linked=linked, extension_symbols=extension_symbols,
+                          elf_roots=sorted(str(binary) for binary in set(binaries)),
+                          executable=str(Path(sys.executable).resolve()),
+                          prefix=sys.prefix, base_prefix=sys.base_prefix)
+          if stage == 'source':
+              (destination/'guard-source.json').write_text(json.dumps(data, sort_keys=True))
+          else:
+              original = json.loads((destination/'guard-source.json').read_text())
+              if original['source'] != source:
+                  raise RuntimeError('original tracked source changed during install/probe')
+              if stage == 'before':
+                  (destination/('guard-before-'+snapshot_label+'.json')).write_text(json.dumps(data, sort_keys=True))
+              elif stage == 'after':
+                  before = json.loads((destination/('guard-before-'+snapshot_label+'.json')).read_text())
+                  if before != data:
+                      for key in ['consumed', 'linked']:
+                          print('NEW108_CHANGED', key, [name for name in
+                              set(before.get(key, {})) | set(data.get(key, {}))
+                              if before.get(key, {}).get(name) != data.get(key, {}).get(name)], flush=True)
+                      raise RuntimeError('consumed source/build/dependency/runtime guard changed')
+              else:
+                  raise RuntimeError('invalid guard stage')
+          print('NEW108_GUARD', json.dumps({
+              'stage': stage, 'snapshot_label': snapshot_label,
+              'phase': os.environ.get('NEW119_PHASE'), 'head': source['head'], 'tree': source['tree'],
+              'index_tree': source['index_tree'], 'index_sha256': source['index_sha256'],
+              'tracked_count': len(tracked), 'all_actual_git_blobs_match': True,
+              'filesystem_tracks_executable_mode': os.name != 'nt',
+              'tracked_sha256': hashlib.sha256(json.dumps(tracked, sort_keys=True).encode()).hexdigest(),
+              'consumed_count': len(data.get('consumed', {})),
+              'consumed_sha256': hashlib.sha256(json.dumps(data.get('consumed', {}), sort_keys=True).encode()).hexdigest(),
+              'linked_count': len(data.get('linked', {})),
+              'elf_root_count': len(data.get('elf_roots', [])),
+              'extension_root_count': len(data.get('extension_symbols', {})), 'unchanged': True,
+          }), flush=True)
+          NEW119_PROBE_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/probe-guard.py"
+      - name: Stage critical runtime provenance helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/critical-runtime-guard.py" <<'NEW119_CRITICAL_RUNTIME_GUARD_PY'
+          """Hosted-only critical runtime provenance, distinct from the complete ELF guard.
+          
+          This hashes explicit actual module/interpreter/solver/helper files. It does not
+          claim an entire environment or transitive loader closure for official suites.
+          """
+          import hashlib
+          import importlib
+          import importlib.metadata
+          import inspect
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+          import sysconfig
+          
+          import lmfit
+          import numpy as np
+          import scipy
+          from scipy.optimize import least_squares, leastsq
+          
+          root = Path(os.environ['NEW108_SOURCE']).resolve()
+          destination = Path(os.environ['NEW108_EVIDENCE']).resolve()
+          operation, label = sys.argv[1:3]
+          if operation not in ['baseline', 'check'] or label not in ['public16', 'focused40', 'full-suite', 'style-docs']:
+              raise RuntimeError('invalid critical provenance operation/label')
+          
+          
+          def sha256(path):
+              value = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024*1024):
+                      value.update(chunk)
+              return value.hexdigest()
+          
+          
+          files = {}
+          
+          
+          def add_file(path):
+              path = Path(path).resolve()
+              if not path.is_file():
+                  raise RuntimeError('critical runtime file missing: '+str(path))
+              files[str(path)] = {'bytes': path.stat().st_size, 'sha256': sha256(path)}
+              return str(path)
+          
+          
+          modules = {}
+          
+          
+          def add_module(module):
+              if getattr(module, '__file__', None):
+                  path = add_file(module.__file__)
+                  modules[module.__name__] = path
+                  if module.__name__ == 'lmfit' or module.__name__.startswith('lmfit.'):
+                      if not Path(path).is_relative_to(root):
+                          raise RuntimeError('critical lmfit module outside whole source: '+path)
+          
+          
+          for name in ['lmfit', 'lmfit.model', 'lmfit.minimizer', 'numpy', 'scipy',
+                       'numpy._core._multiarray_umath', 'numpy.linalg._umath_linalg',
+                       'scipy.optimize._minpack', 'scipy.optimize._lsq.trf',
+                       'pytest', '_pytest.runner', '_pytest.python', '_pytest.assertion.rewrite']:
+              add_module(importlib.import_module(name))
+          # Hash every actual lmfit source module, including the generated version module.
+          for path in sorted((root/'lmfit').glob('*.py')):
+              add_file(path)
+          
+          functions = {}
+          for name, function in [('scipy.optimize.leastsq', leastsq),
+                                 ('scipy.optimize.least_squares', least_squares)]:
+              module = importlib.import_module(function.__module__)
+              add_module(module)
+              source = inspect.getsourcefile(function)
+              if source is None:
+                  raise RuntimeError('solver has no inspectable source: '+name)
+              record = {'module': function.__module__, 'qualname': function.__qualname__,
+                        'source_file': add_file(source)}
+              if hasattr(function, '__code__'):
+                  record['function_code_sha256'] = hashlib.sha256(function.__code__.co_code).hexdigest()
+              functions[name] = record
+              # Follow the actual public solver's immediate numerical backend references.
+              for key in ['_minpack', 'trf', 'dogbox', 'call_minpack']:
+                  backend = getattr(function, '__globals__', {}).get(key)
+                  if inspect.ismodule(backend):
+                      add_module(backend)
+                  elif inspect.isfunction(backend):
+                      add_module(importlib.import_module(backend.__module__))
+          
+          helpers = {}
+          for name in ['probe-guard.py', 'critical-runtime-guard.py', 'fix.patch']:
+              path = destination/name
+              helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          if label in ['public16', 'focused40']:
+              for name in ['probe-before.py', 'probe-assess.py', 'probe-assess-after.py',
+                           'test_complex_weight_regressions.py']:
+                  path = destination/name
+                  helpers[name] = {'path': add_file(path), 'sha256': sha256(path)}
+          
+          interpreter = add_file(Path(sys.executable).resolve())
+          for module in [hashlib, importlib, inspect, json, platform, subprocess, sysconfig]:
+              add_module(module)
+          source = {name: subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+                    for name, args in [('head', ['rev-parse', 'HEAD']),
+                                       ('head_tree', ['rev-parse', 'HEAD^{tree}']),
+                                       ('index_tree', ['write-tree'])]}
+          data = {'scope': 'explicit actual source/module/solver/interpreter/helper files; not all runtime files or transitive linked libraries',
+                  'source': source, 'phase': os.environ['NEW119_PHASE'], 'label': label,
+                  'python': {'version': sys.version, 'implementation': platform.python_implementation(),
+                             'platform': platform.platform(), 'executable': interpreter,
+                             'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
+                             'stdlib': sysconfig.get_path('stdlib')},
+                  'versions': {name: importlib.metadata.version(name) for name in
+                               ['lmfit', 'numpy', 'scipy', 'asteval', 'uncertainties', 'dill', 'pytest']},
+                  'runtime_versions': {'lmfit': lmfit.__version__, 'numpy': np.__version__,
+                                       'scipy': scipy.__version__},
+                  'declared_generated_outputs': {
+                      'public16': ['runner-temporary raw observations/status/guard manifests'],
+                      'focused40': ['runner-temporary pytest log/JUnit/status/guard manifests',
+                                    'pytest .pytest_cache (excluded by the unchanged complete guard)'],
+                      'full-suite': ['coverage HTML and .coverage', 'pytest .pytest_cache',
+                                     'runner-temporary native logs/status/critical manifests',
+                                     'Windows doc/_build, doc/examples, examples/documentation, doc/extensions.py'],
+                      'style-docs': ['doc/_build, doc/examples, examples/documentation, doc/extensions.py',
+                                     'gallery execution data and timing reports',
+                                     'runner-temporary pre-commit environments, logs/status/critical manifests']
+                  }[label],
+                  'output_scope': 'Generated outputs are declared, not accepted as exceptions to tracked-source or critical-file checks; untracked outputs are outside this explicit-file snapshot.',
+                  'modules': dict(sorted(modules.items())), 'solvers': functions,
+                  'helpers': helpers, 'files': dict(sorted(files.items()))}
+          snapshot = destination/('critical-baseline-'+label+'.json')
+          if operation == 'baseline':
+              snapshot.write_text(json.dumps(data, sort_keys=True))
+          else:
+              before = json.loads(snapshot.read_text())
+              if before != data:
+                  print('NEW119_CRITICAL_CHANGED_FILES', json.dumps(sorted(
+                      name for name in set(before['files']) | set(data['files'])
+                      if before['files'].get(name) != data['files'].get(name))), flush=True)
+                  raise RuntimeError('critical runtime provenance changed during '+label)
+          print('NEW119_CRITICAL_RUNTIME', json.dumps({
+              'operation': operation, 'file_count': len(files),
+              'manifest_sha256': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+              'provenance': data, 'unchanged': operation == 'check'}, sort_keys=True), flush=True)
+          NEW119_CRITICAL_RUNTIME_GUARD_PY
+          sha256sum "$NEW108_EVIDENCE/critical-runtime-guard.py"
+      - name: Stage exact candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$NEW108_EVIDENCE/fix.patch" <<'NEW119_FIX_PATCH'
+          --- a/doc/model.rst
+          +++ b/doc/model.rst
+          @@ -686,6 +686,13 @@
+           **will always be coerced** to an 1-dimensional ndarray with dtype "float64"
+           when it is passed to the solver. If it cannot be coerced, an error will occur
+           and the fit will be aborted.
+          +
+          +For complex data or model output, real and imaginary residual components are
+          +handled separately. Real weights apply equally to both components. With
+          +complex weights, ``weights.real`` multiplies the real residual and
+          +``weights.imag`` multiplies the imaginary residual, rather than performing
+          +complex multiplication. For example, a residual ``1+2j`` with weight
+          +``3+4j`` contributes ``3**2 + 8**2`` to chi-square.
+           
+           That coercion will usually work for "array like" data that is not already a
+           float64 ndarray.  But, depending on the model function, the calculations within
+          --- a/doc/whatsnew.rst
+          +++ b/doc/whatsnew.rst
+          @@ -26,6 +26,8 @@
+           
+           Fixes:
+           
+          +- apply complex weights independently to real and imaginary model residuals,
+          +  restoring the documented weighted objective and fit statistics
+           - prevent log-normal evaluations from modifying input arrays and allow read-only
+             coordinate arrays
+           - avoid overflowing gamma factors in ``pearson7``, ``students_t``, and
+          --- a/lmfit/model.py
+          +++ b/lmfit/model.py
+          @@ -878,11 +878,8 @@
+                   real part of the weights are applied to the real part of the
+                   residual and the imaginary part is treated correspondingly.
+           
+          -        Since the underlying `scipy.optimize` routines expect
+          -        ``numpy.float`` arrays, the only complex type supported is
+          -        ``complex``.
+          -
+          -        The "ravels" throughout are necessary to support `pandas.Series`.
+          +        Complex residuals are converted to a one-dimensional array of
+          +        interleaved real and imaginary parts for `scipy.optimize`.
+           
+                   """
+                   model = self.eval(params, **kwargs)
+          @@ -895,16 +892,19 @@
+           
+                   diff = data - model
+           
+          -        if diff.dtype is complex:
+          -            # data/model are complex
+          -            diff = diff.ravel().view(float)
+          +        if np.iscomplexobj(diff):
+          +            diff = np.asarray(diff, dtype=complex)
+                       if weights is not None:
+          -                if weights.dtype is complex:
+          -                    # weights are complex
+          -                    weights = weights.ravel().view(float)
+          +                weights = np.asarray(weights)
+          +                if weights.size == diff.size:
+          +                    # Weights need the same size, not necessarily the same shape.
+          +                    weights = weights.reshape(diff.shape)
+          +                if np.iscomplexobj(weights):
+          +                    diff.real *= np.real(weights)
+          +                    diff.imag *= np.imag(weights)
+                           else:
+          -                    # real weights but complex data
+          -                    weights = (weights + 1j * weights).ravel().view(float)
+          +                    diff *= weights
+          +            return diff.ravel().view(float)
+                   if weights is not None:
+                       diff *= weights
+                   return diff
+          --- a/tests/test_model.py
+          +++ b/tests/test_model.py
+          @@ -469,6 +469,97 @@
+                   else:
+                       assert result.userkws['x'].dtype == expected_dtype
+                       assert result.userargs[0].dtype == expected_dtype
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_dtype', [np.complex64, np.complex128, '>c16'])
+          +@pytest.mark.parametrize('layout', ['C', 'F', 'strided', 'reversed'])
+          +def test_complex_model_weighted_fit(method, weight_dtype, layout):
+          +    """Complex weights minimize the independent quadrature objective."""
+          +    x = np.arange(1., 7.)
+          +    if layout in ('F', 'strided'):
+          +        x = x.reshape(2, 3)
+          +    data = 2j*x
+          +    weights = np.full(x.shape, 1+10j, dtype=weight_dtype)
+          +    if layout == 'F':
+          +        x, data, weights = (np.asfortranarray(arr) for arr in (x, data, weights))
+          +    elif layout == 'strided':
+          +        x, data, weights = (np.stack((arr, arr), axis=-1)[..., 0]
+          +                            for arr in (x, data, weights))
+          +    elif layout == 'reversed':
+          +        x, data, weights = (arr[::-1] for arr in (x, data, weights))
+          +    originals = [arr.copy() for arr in (x, data, weights)]
+          +    for arr in (x, data, weights):
+          +        arr.setflags(write=False)
+          +
+          +    def complex_model(x, a):
+          +        return a*(1+1j)*x
+          +
+          +    result = Model(complex_model).fit(data, x=x, a=0.5, weights=weights,
+          +                                      method=method)
+          +
+          +    # The objective is sum(x**2)*(a**2 + 100*(2-a)**2).
+          +    expected_a = 200/101
+          +    expected_residual = np.column_stack((-200*x.ravel()/101,
+          +                                         20*x.ravel()/101)).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7)
+          +    assert_allclose(result.chisqr, 400*np.sum(x*x)/101, rtol=1.e-7)
+          +    for original, actual in zip(originals, (x, data, weights)):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+          +
+          +
+          +@pytest.mark.parametrize('method', ['leastsq', 'least_squares'])
+          +@pytest.mark.parametrize('weight_kind', ['none', 'real', 'equal', 'scalar',
+          +                                         'list', 'broadcast', 'flat', 'real_only'])
+          +def test_complex_model_weight_controls(method, weight_kind):
+          +    """Weighting preserves ordinary fits and supported array-like inputs."""
+          +    x = np.arange(1., 7.).reshape(2, 3)
+          +    data = 2j*x
+          +    if weight_kind == 'none':
+          +        weights = None
+          +    elif weight_kind in ('real', 'real_only'):
+          +        weights = 1+0.1*x
+          +    elif weight_kind == 'equal':
+          +        weights = np.full(x.shape, 1+1j)
+          +    elif weight_kind == 'scalar':
+          +        weights = 1+10j
+          +    elif weight_kind == 'flat':
+          +        weights = np.full(x.size, 1+10j)
+          +    elif weight_kind == 'list':
+          +        weights = np.full(x.shape, 1+10j).tolist()
+          +    else:
+          +        weights = np.full((1, 3), 1+10j)
+          +    is_real = weight_kind == 'real_only'
+          +    if is_real:
+          +        data = 2*x+0.1*np.sin(x)
+          +    originals = [np.copy(arr) for arr in (x, data, weights)
+          +                 if arr is not None]
+          +
+          +    def model(x, a):
+          +        return a*x if is_real else a*(1+1j)*x
+          +
+          +    result = Model(model).fit(data, x=x, a=0.5, weights=weights, method=method)
+          +    expected_weights = weights
+          +    if weight_kind == 'flat':
+          +        expected_weights = weights.reshape(x.shape)
+          +    wr = 1 if weights is None else np.real(expected_weights)
+          +    wi = np.imag(expected_weights) if np.iscomplexobj(weights) else wr
+          +    if is_real:
+          +        expected_a = np.sum(wr**2*x*data)/np.sum(wr**2*x*x)
+          +        expected_residual = ((data-expected_a*x)*wr).ravel()
+          +    else:
+          +        expected_a = 200/101 if weight_kind in ('scalar', 'list', 'broadcast', 'flat') else 1
+          +        expected_residual = np.stack((-expected_a*x*wr,
+          +                                      (2-expected_a)*x*wi), axis=-1).ravel()
+          +    assert result.success
+          +    assert_allclose(result.params['a'].value, expected_a, rtol=1.e-7)
+          +    assert_allclose(result.residual, expected_residual, rtol=1.e-7, atol=1.e-7)
+          +    assert_allclose(result.chisqr, np.sum(expected_residual**2), rtol=1.e-7)
+          +    actuals = [np.asarray(arr) for arr in (x, data, weights) if arr is not None]
+          +    for original, actual in zip(originals, actuals):
+          +        np.testing.assert_array_equal(actual, original, strict=True)
+           
+           
+           def test_figure_default_title(peakdata):
+          NEW119_FIX_PATCH
+          sha256sum "$NEW108_EVIDENCE/fix.patch"
+      - name: Apply only reviewed candidate and freeze complete source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$NEW108_SOURCE" apply --check --index "$NEW108_EVIDENCE/fix.patch"
+          git -C "$NEW108_SOURCE" apply --index "$NEW108_EVIDENCE/fix.patch"
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+      - name: Install official build and documentation dependencies
+        working-directory: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build setuptools wheel
+          python -m build
+          python -m pip install --no-build-isolation '.[all]'
+          python -m pip list
+          sudo apt-get update
+          sudo apt-get install -qq -y texlive-latex-extra latexmk
+          export PRE_COMMIT_HOME="$RUNNER_TEMP/new119-precommit"
+          echo "PRE_COMMIT_HOME=$PRE_COMMIT_HOME" >> "$GITHUB_ENV"
+          pre-commit install
+          pre-commit validate-config
+          pre-commit install-hooks
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" baseline style-docs
+      - name: Run official pre-commit and distribution checks with raw status
+        working-directory: target
+        shell: bash
+        run: |
+          set +e
+          pre-commit run --all-files 2>&1 | tee "$RUNNER_TEMP/new119-precommit.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/new119-precommit.status"
+          echo "NEW119_PRECOMMIT_PROCESS $status"
+          check-wheel-contents dist/*.whl 2>&1 | tee "$RUNNER_TEMP/new119-wheel.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/new119-wheel.status"
+          echo "NEW119_WHEEL_PROCESS $status"
+          twine check dist/* 2>&1 | tee "$RUNNER_TEMP/new119-twine.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/new119-twine.status"
+          echo "NEW119_TWINE_PROCESS $status"
+          exit 0
+      - name: Build complete official documentation including examples and PDF
+        working-directory: target
+        shell: bash
+        run: |
+          set +e
+          make -C doc all 2>&1 | tee "$RUNNER_TEMP/new119-docs.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/new119-docs.status"
+          echo "NEW119_DOCS_PROCESS $status"
+          exit 0
+      - name: Verify candidate and enforce every actual style/build/docs status
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$NEW108_EVIDENCE/probe-guard.py" source
+          PYTHONPATH="$NEW108_SOURCE" python "$NEW108_EVIDENCE/critical-runtime-guard.py" check style-docs
+          python - <<'NEW119_OFFICIAL_STATUSES'
+          import json
+          import os
+          from pathlib import Path
+          p = Path(os.environ['RUNNER_TEMP'])
+          statuses = {name: int((p/('new119-'+name+'.status')).read_text())
+                      for name in ['precommit', 'wheel', 'twine', 'docs']}
+          print('NEW119_OFFICIAL_RECORDED_STATUSES', json.dumps(statuses), flush=True)
+          raise SystemExit(1 if any(statuses.values()) else 0)
+          NEW119_OFFICIAL_STATUSES
