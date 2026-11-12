@@ -135,7 +135,7 @@ jobs:
               source.write_bytes(subprocess.check_output(['git', 'show', base + ':' + str(source)]))
               failures = run_tests('red-native', [str(tests), '-k', focused], 1)
               assert results['red-native'] == dict(exit_code=1, tests=27, failures=9, errors=0, skipped=0, passed=18)
-              assert all('AssertionError' in case.find('failure').get('message', '') for case in failures)
+              assert all('AssertionError' in (case.find('failure').text or '') for case in failures)
               tests.write_bytes(subprocess.check_output(['git', 'show', base + ':' + str(tests)]))
               run_tests('baseline-full', ['--doctest-modules', '--cov=petl', '--cov-branch',
                          '--cov-report=json:' + str(tmp / 'baseline-coverage.json'),
