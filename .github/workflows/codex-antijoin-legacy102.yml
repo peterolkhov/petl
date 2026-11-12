@@ -1,0 +1,410 @@
+name: PETL810 exact legacy repair validation102
+on:
+  push:
+    branches: ['codex/verify-antijoin-legacy102']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: '2.7.18'
+            mode: basic
+            scope: full
+            legacy: true
+          - os: ubuntu-22.04
+            python: '3.6.15'
+            mode: full
+            scope: full
+            legacy: true
+          - os: windows-2022
+            python: '3.6.8'
+            mode: basic
+            scope: basic
+            legacy: true
+          - os: ubuntu-24.04
+            python: '3.13'
+            mode: full
+            scope: full
+            legacy: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_PYTHON: ${{ matrix.python }}
+      TEST_MODE: ${{ matrix.mode }}
+      TEST_SCOPE: ${{ matrix.scope }}
+      DISABLE_BLOSC_AVX2: '1'
+    steps:
+      - name: Initialize free-runner paths and exact-byte checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/petl-native102"
+          echo "AUDIT_ROOT=$RUNNER_TEMP/petl-native102" >> "$GITHUB_ENV"
+          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
+          echo "PYTHONIOENCODING=utf-8" >> "$GITHUB_ENV"
+          echo "PYTHONDONTWRITEBYTECODE=1" >> "$GITHUB_ENV"
+          echo "PYTHONHASHSEED=42" >> "$GITHUB_ENV"
+          echo "PYTHONTRACEMALLOC=1" >> "$GITHUB_ENV"
+          git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: peterolkhov/petl
+          ref: 3049bbddae65967eef93c40ea7f2996aa3a3e38d
+          path: package
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Linux format-build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-h5py
+      - name: Set up actual legacy CPython without caches
+        if: matrix.legacy
+        uses: MatteoH2O1999/setup-python@1af1a6d642d3bc9b322c25d2e71378a213e41234
+        with:
+          python-version: ${{ matrix.python }}
+          cache-build: false
+      - name: Set up actual modern CPython without caches
+        if: ${{ !matrix.legacy }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Bind semantic runtime environment
+        run: |
+          if [[ "${{ matrix.python }}" == 2.* ]]; then
+            echo 'PY_MAJOR_VERSION=py2' >> "$GITHUB_ENV"
+          else
+            echo 'PY_MAJOR_VERSION=py3' >> "$GITHUB_ENV"
+          fi
+          python --version
+          python -m pip --version
+      - name: Write exact reviewed repair bytes
+        run: |
+          python - <<'PATCH_BYTES'
+          import base64, hashlib, os
+          patch = base64.b64decode('LS0tIGEvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKKysrIGIvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKQEAgLTYyOSwxMiArNjI5LDE0IEBACiAgICAgbGdpdCA9IGl0ZXJ0b29scy5ncm91cGJ5KGxpdCwga2V5PWxnZXRrKQogICAgIHJnaXQgPSBpdGVydG9vbHMuZ3JvdXBieShyaXQsIGtleT1yZ2V0aykKICAgICBscm93Z3JwID0gW10KKyAgICBsZ3JwX3BlbmRpbmcgPSBGYWxzZQogCiAgICAgIyBsb29wIHVudGlsICplaXRoZXIqIG9mIHRoZSBpdGVyYXRvcnMgaXMgZXhoYXVzdGVkCiAgICAgdHJ5OgogCiAgICAgICAgICMgcGljayBvZmYgaW5pdGlhbCByb3cgZ3JvdXBzCiAgICAgICAgIGxrdmFsLCBscm93Z3JwID0gbmV4dChsZ2l0KQorICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgIHJrdmFsLCBfID0gbmV4dChyZ2l0KQogCiAgICAgICAgIHdoaWxlIFRydWU6CkBAIC02NDIsMjIgKzY0NCwyNiBAQAogICAgICAgICAgICAgICAgIGZvciByb3cgaW4gbHJvd2dycDoKICAgICAgICAgICAgICAgICAgICAgeWllbGQgdHVwbGUocm93KQogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBsZWZ0CisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICBlbGlmIGxrdmFsID4gcmt2YWw6CiAgICAgICAgICAgICAgICAgIyBhZHZhbmNlIHJpZ2h0CiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBib3RoCisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAKICAgICBleGNlcHQgU3RvcEl0ZXJhdGlvbjoKICAgICAgICAgcGFzcwogCi0gICAgIyBBbnkgbWF0Y2hlZCBvciB5aWVsZGVkIGdyb3VwIHdhcyBjb25zdW1lZCB3aGVuIGxnaXQgYWR2YW5jZWQuCi0gICAgIyBEcmFpbiB0aGUgcGVuZGluZyBncm91cCBldmVuIHdoZW4gdGhlIHJpZ2h0IHRhYmxlIHdhcyBlbXB0eS4KLSAgICBmb3Igcm93IGluIGxyb3dncnA6Ci0gICAgICAgIHlpZWxkIHR1cGxlKHJvdykKKyAgICAjIE9ubHkgZHJhaW4gYW4gdW5tYXRjaGVkIGdyb3VwLCBldmVuIGlmIHRoZSByaWdodCB0YWJsZSB3YXMgZW1wdHkuCisgICAgaWYgbGdycF9wZW5kaW5nOgorICAgICAgICBmb3Igcm93IGluIGxyb3dncnA6CisgICAgICAgICAgICB5aWVsZCB0dXBsZShyb3cpCiAgICAgIyBhbmQgdGhlIHJlc3QuLi4KICAgICBmb3IgbGt2YWwsIGxyb3dncnAgaW4gbGdpdDoKICAgICAgICAgZm9yIHJvdyBpbiBscm93Z3JwOgotLS0gYS9wZXRsL3Rlc3QvdHJhbnNmb3JtL3Rlc3Rfam9pbnMucHkKKysrIGIvcGV0bC90ZXN0L3RyYW5zZm9ybS90ZXN0X2pvaW5zLnB5CkBAIC0xMTkxLDYgKzExOTEsMTkgQEAKICAgICBhc3NlcnQgbmV4dChhY3R1YWwpID09IChOb25lLCAxMCkKICAgICBhc3NlcnQgY29uc3VtZWQgPT0gWygnaWQnLCAnYW1vdW50JyksIChOb25lLCAxMCldCiAgICAgaWVxKCgoTm9uZSwgMjApLCAoMiwgMzApKSwgYWN0dWFsKQorCisKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgncHJlc29ydGVkJywgW0ZhbHNlLCBUcnVlXSkKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgnbGVmdCcsIFsKKyAgICAoKCdpZCcsICdhbW91bnQnKSwgKDEsIDEwKSwgKDIsIDIwKSksCisgICAgKCgnaWQnLCAnYW1vdW50JyksICgxLCAxMCksICgyLCAyMCksICgyLCAzMCkpLAorXSkKK2RlZiB0ZXN0X2FudGlqb2luX2ZpbmFsX251bWVyaWNfbWF0Y2gocHJlc29ydGVkLCBsZWZ0KToKKyAgICByaWdodCA9ICgoJ2lkJywpLCAoMiwpKQorICAgIGV4cGVjdCA9ICgoJ2lkJywgJ2Ftb3VudCcpLCAoMSwgMTApKQorICAgIGFjdHVhbCA9IGFudGlqb2luKGxlZnQsIHJpZ2h0LCBrZXk9J2lkJywgcHJlc29ydGVkPXByZXNvcnRlZCkKKyAgICBpZXEoZXhwZWN0LCBhY3R1YWwpCisgICAgaWVxKGV4cGVjdCwgYWN0dWFsKQogCiAKIGRlZiBfdGVzdF9sb29rdXBqb2luXzEobG9va3Vwam9pbl9pbXBsKToK')
+          assert hashlib.sha256(patch).hexdigest() == '5d59e93e0f7376aa08766279cf101f17c966cd1fd9f2e647135eac27a93dad52'
+          with open(os.path.join(os.environ['AUDIT_ROOT'], 'repair.patch'), 'wb') as stream:
+              stream.write(patch)
+          print('REVIEWED_REPAIR_PATCH_SHA256', hashlib.sha256(patch).hexdigest())
+          PATCH_BYTES
+      - name: Native original-base, actual-bad-PR, numeric RED and repaired GREEN
+        working-directory: package
+        run: |
+          cat > "$AUDIT_ROOT/native.py" <<'NATIVE_SOURCE'
+          from __future__ import print_function
+          import base64
+          import glob
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          
+          BASE = 'fc8be5bb09c837be76aa22fb26e787bbb43b9f2b'
+          OLD = '3049bbddae65967eef93c40ea7f2996aa3a3e38d'
+          CANDIDATE_TREE = '189e3aaf0c0ae540152ccd70395edbbd8000d7e0'
+          FROZEN = '6fc7332e73771b43260dc47407520fbcc1edffdba879b4280a13da291ffd97cf'
+          SOURCE = 'petl/transform/joins.py'
+          TESTS = 'petl/test/transform/test_joins.py'
+          OUT = os.environ['AUDIT_ROOT']
+          FOCUS = ('antijoin_empty_right_none_key or antijoin_none_key_lrkey or '
+                   'antijoin_group_exhaustion or antijoin_empty_right_streaming')
+          ALL31 = FOCUS + ' or antijoin_final_numeric_match'
+          legacy = sys.version_info[:2] in ((2, 7), (3, 6))
+          expected = tuple(int(n) for n in os.environ['EXPECTED_PYTHON'].split('.'))
+          assert sys.version_info[:len(expected)] == expected, (sys.version, expected)
+          assert sys.implementation.name == 'cpython' if hasattr(sys, 'implementation') else sys.subversion[0] == 'CPython'
+          print('REAL_INTERPRETER', sys.executable, sys.version)
+          if not os.path.isdir(OUT):
+              os.makedirs(OUT)
+          
+          
+          def raw(name, command, env=None, allow=False):
+              stdout_path = os.path.join(OUT, name + '.stdout')
+              stderr_path = os.path.join(OUT, name + '.stderr')
+              with open(stdout_path, 'wb') as stdout, open(stderr_path, 'wb') as stderr:
+                  code = subprocess.call(command, stdout=stdout, stderr=stderr, env=env)
+              with open(os.path.join(OUT, name + '.status'), 'w') as status:
+                  status.write(str(code) + '\n')
+              print('::group::RAW ' + name)
+              for path in (stdout_path, stderr_path):
+                  print('RAW_FILE', path)
+                  sys.stdout.flush()
+                  with open(path, 'rb') as stream:
+                      data = stream.read()
+                  if hasattr(sys.stdout, 'buffer'):
+                      sys.stdout.buffer.write(data)
+                  else:
+                      sys.stdout.write(data)
+                  sys.stdout.flush()
+              print('RAW_STATUS', name, code)
+              print('::endgroup::')
+              if not allow:
+                  assert code == 0, (name, code)
+              return code
+          
+          
+          def output(command):
+              return subprocess.check_output(command).decode('utf-8').strip()
+          
+          
+          def digest(path):
+              with open(path, 'rb') as stream:
+                  return hashlib.sha256(stream.read()).hexdigest()
+          
+          
+          def tree_guard(tree, head):
+              assert output(['git', 'rev-parse', 'HEAD']) == head
+              assert output(['git', 'write-tree']) == tree
+              assert subprocess.call(['git', 'diff-files', '--quiet']) == 0
+              for entry in subprocess.check_output(['git', 'ls-files', '-s', '-z']).split(b'\0'):
+                  if not entry:
+                      continue
+                  metadata, path = entry.split(b'\t', 1)
+                  mode, blob, stage = metadata.split()
+                  assert stage == b'0'
+                  with open(path.decode('utf-8'), 'rb') as tracked:
+                      data = tracked.read()
+                  actual = hashlib.sha1(('blob %d\0' % len(data)).encode('ascii') + data).hexdigest()
+                  assert actual == blob.decode('ascii'), path
+              print('SOURCE_GUARD', json.dumps(dict(head=head, index_tree=tree,
+                    joins_sha256=digest(SOURCE), tests_sha256=digest(TESTS)), sort_keys=True))
+          
+          
+          def freeze_guard():
+              with open(TESTS, 'rb') as stream:
+                  data = stream.read()
+              start = data.index(b"@pytest.mark.parametrize('presorted', [False, True])", data.index(b'def test_antijoin():'))
+              block = data[start:start + 2669]
+              assert hashlib.sha256(block).hexdigest() == FROZEN, hashlib.sha256(block).hexdigest()
+              print('FROZEN27', FROZEN, len(block))
+          
+          
+          def build(name):
+              for path in ['build', 'dist', 'petl.egg-info']:
+                  if os.path.isdir(path):
+                      shutil.rmtree(path)
+              raw(name + '-build', [sys.executable, '-m', 'build'])
+              wheels = glob.glob('dist/*.whl')
+              assert len(wheels) == 1, wheels
+              raw(name + '-install', [sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--force-reinstall', '--no-deps', wheels[0]])
+          
+          
+          def tests(name, args, failures=0, count=None):
+              xml = os.path.join(OUT, name + '.xml')
+              env = os.environ.copy()
+              env['AUDIT_JOINS_SHA256'] = digest(SOURCE)
+              env['AUDIT_TESTS_SHA256'] = digest(TESTS)
+              env['AUDIT_PACKAGE_DIR'] = os.getcwd()
+              env['PYTHONPATH'] = OUT + os.pathsep + os.getcwd()
+              code = raw(name, [sys.executable, '-m', 'pytest', '-p', 'native_guard', '-v', '-ra'] + args + ['--junitxml=' + xml], env=env, allow=True)
+              cases = list(ET.parse(xml).iter('testcase'))
+              bad = [c for c in cases if c.find('failure') is not None]
+              errors = [c for c in cases if c.find('error') is not None]
+              skipped = [c for c in cases if c.find('skipped') is not None]
+              summary = dict(name=name, exit_code=code, total=len(cases), failures=len(bad), errors=len(errors), skipped=len(skipped))
+              print('NATIVE_GATE', json.dumps(summary, sort_keys=True))
+              assert code == (1 if failures else 0), summary
+              assert len(bad) == failures and not errors, summary
+              if count is not None:
+                  assert len(cases) == count and not skipped, summary
+              if failures:
+                  for case in bad:
+                      case_name = case.attrib['name']
+                      assert any(n in case_name for n in ('test_antijoin_none_key_lrkey[right3-', 'test_antijoin_group_exhaustion[left2-', 'test_antijoin_final_numeric_match[')), case_name
+                      assert 'AssertionError' in (case.find('failure').text or ''), case_name
+              return summary
+          
+          
+          mode = [] if os.environ['TEST_MODE'] == 'basic' else ['--doctest-modules']
+          full = mode + ['--cov=petl', '--durations=10', 'petl']
+          raw('pip-upgrade', [sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
+          raw('test-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-tests.txt'])
+          raw('build-dependencies', [sys.executable, '-m', 'pip', 'install', '--upgrade', 'build', 'setuptools', 'wheel'])
+          if os.environ['TEST_SCOPE'] == 'full':
+              raw('format-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-formats.txt'])
+          if not legacy:
+              # Matches upstream's explicitly nonfatal optional dependency installation.
+              raw('optional-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-optional.txt'], allow=True)
+          raw('installed-packages', [sys.executable, '-m', 'pip', 'list', '--format=freeze'])
+          print('SERVICE_SCOPE: no database/SMB/SFTP services or requirements enabled; all pytest skips and optional-install status retained. Not the complete upstream service matrix.')
+          
+          # Compile and consume this guard as a normal pytest plugin inside each fresh process.
+          guard = '''import hashlib, inspect, os, sys\nimport petl\nimport petl.transform.joins as joins\ndef pytest_sessionstart(session):\n    root = os.path.realpath(os.environ['AUDIT_PACKAGE_DIR'])\n    assert os.path.realpath(petl.__file__).startswith(root + os.sep)\n    path = os.path.join(root, 'petl', 'transform', 'joins.py')\n    tests = os.path.join(root, 'petl', 'test', 'transform', 'test_joins.py')\n    assert hashlib.sha256(open(path, 'rb').read()).hexdigest() == os.environ['AUDIT_JOINS_SHA256']\n    assert hashlib.sha256(open(tests, 'rb').read()).hexdigest() == os.environ['AUDIT_TESTS_SHA256']\n    fn = joins.iterantijoin\n    code = getattr(fn, '__code__', None) or fn.func_code\n    compiled = compile(open(path, 'rb').read(), code.co_filename, 'exec', 0, True)\n    expected = [c for c in compiled.co_consts if inspect.iscode(c) and c.co_name == 'iterantijoin'][0]\n    for attr in ('co_code', 'co_consts', 'co_names', 'co_varnames', 'co_firstlineno'):\n        assert getattr(code, attr) == getattr(expected, attr), attr\n    assert petl.antijoin is joins.antijoin\n    print('CONSUMED_RUNTIME_GUARD', sys.version, petl.__file__, joins.__file__, os.environ['AUDIT_JOINS_SHA256'], os.environ['AUDIT_TESTS_SHA256'])\n'''
+          with open(os.path.join(OUT, 'native_guard.py'), 'w') as stream:
+              stream.write(guard)
+          
+          raw('reset-original-base', ['git', 'reset', '--hard', BASE])
+          tree_guard('d936d5754ffad5461d94b7cc67a8d751c36aebdd', BASE)
+          build('original-base')
+          tests('original-base-full', full)
+          tree_guard('d936d5754ffad5461d94b7cc67a8d751c36aebdd', BASE)
+          raw('reset-actual-bad-pr', ['git', 'reset', '--hard', OLD])
+          tree_guard('65f2bfd13278b3bf7fa470ee8f76487283458d05', OLD)
+          freeze_guard()
+          build('actual-bad-pr')
+          tests('bad-pr-frozen27', [TESTS, '-k', FOCUS], 4 if legacy else 0, 27)
+          tests('bad-pr-full', full, 4 if legacy else 0)
+          # Apply the exact reviewed patch, preserve candidate files, then expose numeric
+          # cases to actual bad production without changing any frozen expected output.
+          raw('apply-reviewed-repair', ['git', 'apply', os.path.join(OUT, 'repair.patch')])
+          raw('index-reviewed-candidate', ['git', 'add', '-u'])
+          tree_guard(CANDIDATE_TREE, OLD)
+          freeze_guard()
+          with open(SOURCE, 'rb') as stream:
+              candidate_source = stream.read()
+          with open(TESTS, 'rb') as stream:
+              candidate_tests = stream.read()
+          raw('reset-numeric-control-to-bad-pr', ['git', 'reset', '--hard', OLD])
+          with open(TESTS, 'wb') as stream:
+              stream.write(candidate_tests)
+          raw('index-numeric-control', ['git', 'add', '-u'])
+          print('BAD31_CONTROL_TREE', output(['git', 'write-tree']))
+          freeze_guard()
+          tests('bad-pr-all31', [TESTS, '-k', ALL31], 8 if legacy else 0, 31)
+          with open(SOURCE, 'wb') as stream:
+              stream.write(candidate_source)
+          raw('index-restored-candidate', ['git', 'add', '-u'])
+          tree_guard(CANDIDATE_TREE, OLD)
+          build('repaired-candidate')
+          tests('repaired-frozen27', [TESTS, '-k', FOCUS], 0, 27)
+          tests('repaired-all31', [TESTS, '-k', ALL31], 0, 31)
+          tests('repaired-joins', [TESTS])
+          tests('repaired-full', full)
+          tree_guard(CANDIDATE_TREE, OLD)
+          print('ALL_REQUIRED_NATIVE_GATES_PASSED')
+          NATIVE_SOURCE
+          python "$AUDIT_ROOT/native.py"
+      - name: Retain raw file inventory and independent final status
+        if: always()
+        run: |
+          python - <<'INVENTORY'
+          import hashlib, os
+          root = os.environ['AUDIT_ROOT']
+          for name in sorted(os.listdir(root)):
+              path = os.path.join(root, name)
+              if os.path.isfile(path):
+                  data = open(path, 'rb').read()
+                  print('RAW_INVENTORY', name, len(data), hashlib.sha256(data).hexdigest())
+          INVENTORY
+  docs_and_lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize free-runner paths and exact-byte checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/petl-native102"
+          echo "AUDIT_ROOT=$RUNNER_TEMP/petl-native102" >> "$GITHUB_ENV"
+          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
+          echo "PYTHONIOENCODING=utf-8" >> "$GITHUB_ENV"
+          echo "PYTHONDONTWRITEBYTECODE=1" >> "$GITHUB_ENV"
+          echo "PYTHONHASHSEED=42" >> "$GITHUB_ENV"
+          echo "PYTHONTRACEMALLOC=1" >> "$GITHUB_ENV"
+          git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: peterolkhov/petl
+          ref: 3049bbddae65967eef93c40ea7f2996aa3a3e38d
+          path: package
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Write exact reviewed repair bytes
+        run: |
+          python - <<'PATCH_BYTES'
+          import base64, hashlib, os
+          patch = base64.b64decode('LS0tIGEvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKKysrIGIvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKQEAgLTYyOSwxMiArNjI5LDE0IEBACiAgICAgbGdpdCA9IGl0ZXJ0b29scy5ncm91cGJ5KGxpdCwga2V5PWxnZXRrKQogICAgIHJnaXQgPSBpdGVydG9vbHMuZ3JvdXBieShyaXQsIGtleT1yZ2V0aykKICAgICBscm93Z3JwID0gW10KKyAgICBsZ3JwX3BlbmRpbmcgPSBGYWxzZQogCiAgICAgIyBsb29wIHVudGlsICplaXRoZXIqIG9mIHRoZSBpdGVyYXRvcnMgaXMgZXhoYXVzdGVkCiAgICAgdHJ5OgogCiAgICAgICAgICMgcGljayBvZmYgaW5pdGlhbCByb3cgZ3JvdXBzCiAgICAgICAgIGxrdmFsLCBscm93Z3JwID0gbmV4dChsZ2l0KQorICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgIHJrdmFsLCBfID0gbmV4dChyZ2l0KQogCiAgICAgICAgIHdoaWxlIFRydWU6CkBAIC02NDIsMjIgKzY0NCwyNiBAQAogICAgICAgICAgICAgICAgIGZvciByb3cgaW4gbHJvd2dycDoKICAgICAgICAgICAgICAgICAgICAgeWllbGQgdHVwbGUocm93KQogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBsZWZ0CisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICBlbGlmIGxrdmFsID4gcmt2YWw6CiAgICAgICAgICAgICAgICAgIyBhZHZhbmNlIHJpZ2h0CiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBib3RoCisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAKICAgICBleGNlcHQgU3RvcEl0ZXJhdGlvbjoKICAgICAgICAgcGFzcwogCi0gICAgIyBBbnkgbWF0Y2hlZCBvciB5aWVsZGVkIGdyb3VwIHdhcyBjb25zdW1lZCB3aGVuIGxnaXQgYWR2YW5jZWQuCi0gICAgIyBEcmFpbiB0aGUgcGVuZGluZyBncm91cCBldmVuIHdoZW4gdGhlIHJpZ2h0IHRhYmxlIHdhcyBlbXB0eS4KLSAgICBmb3Igcm93IGluIGxyb3dncnA6Ci0gICAgICAgIHlpZWxkIHR1cGxlKHJvdykKKyAgICAjIE9ubHkgZHJhaW4gYW4gdW5tYXRjaGVkIGdyb3VwLCBldmVuIGlmIHRoZSByaWdodCB0YWJsZSB3YXMgZW1wdHkuCisgICAgaWYgbGdycF9wZW5kaW5nOgorICAgICAgICBmb3Igcm93IGluIGxyb3dncnA6CisgICAgICAgICAgICB5aWVsZCB0dXBsZShyb3cpCiAgICAgIyBhbmQgdGhlIHJlc3QuLi4KICAgICBmb3IgbGt2YWwsIGxyb3dncnAgaW4gbGdpdDoKICAgICAgICAgZm9yIHJvdyBpbiBscm93Z3JwOgotLS0gYS9wZXRsL3Rlc3QvdHJhbnNmb3JtL3Rlc3Rfam9pbnMucHkKKysrIGIvcGV0bC90ZXN0L3RyYW5zZm9ybS90ZXN0X2pvaW5zLnB5CkBAIC0xMTkxLDYgKzExOTEsMTkgQEAKICAgICBhc3NlcnQgbmV4dChhY3R1YWwpID09IChOb25lLCAxMCkKICAgICBhc3NlcnQgY29uc3VtZWQgPT0gWygnaWQnLCAnYW1vdW50JyksIChOb25lLCAxMCldCiAgICAgaWVxKCgoTm9uZSwgMjApLCAoMiwgMzApKSwgYWN0dWFsKQorCisKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgncHJlc29ydGVkJywgW0ZhbHNlLCBUcnVlXSkKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgnbGVmdCcsIFsKKyAgICAoKCdpZCcsICdhbW91bnQnKSwgKDEsIDEwKSwgKDIsIDIwKSksCisgICAgKCgnaWQnLCAnYW1vdW50JyksICgxLCAxMCksICgyLCAyMCksICgyLCAzMCkpLAorXSkKK2RlZiB0ZXN0X2FudGlqb2luX2ZpbmFsX251bWVyaWNfbWF0Y2gocHJlc29ydGVkLCBsZWZ0KToKKyAgICByaWdodCA9ICgoJ2lkJywpLCAoMiwpKQorICAgIGV4cGVjdCA9ICgoJ2lkJywgJ2Ftb3VudCcpLCAoMSwgMTApKQorICAgIGFjdHVhbCA9IGFudGlqb2luKGxlZnQsIHJpZ2h0LCBrZXk9J2lkJywgcHJlc29ydGVkPXByZXNvcnRlZCkKKyAgICBpZXEoZXhwZWN0LCBhY3R1YWwpCisgICAgaWVxKGV4cGVjdCwgYWN0dWFsKQogCiAKIGRlZiBfdGVzdF9sb29rdXBqb2luXzEobG9va3Vwam9pbl9pbXBsKToK')
+          assert hashlib.sha256(patch).hexdigest() == '5d59e93e0f7376aa08766279cf101f17c966cd1fd9f2e647135eac27a93dad52'
+          with open(os.path.join(os.environ['AUDIT_ROOT'], 'repair.patch'), 'wb') as stream:
+              stream.write(patch)
+          print('REVIEWED_REPAIR_PATCH_SHA256', hashlib.sha256(patch).hexdigest())
+          PATCH_BYTES
+      - name: Official Python3.10 singlehtml warnings gate and Ruff baseline
+        working-directory: package
+        run: |
+          cat > "$AUDIT_ROOT/docs.py" <<'DOCS_SOURCE'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          
+          assert sys.version_info[:2] == (3, 10), sys.version
+          out = Path(os.environ['AUDIT_ROOT'])
+          out.mkdir(parents=True, exist_ok=True)
+          base = 'fc8be5bb09c837be76aa22fb26e787bbb43b9f2b'
+          old = '3049bbddae65967eef93c40ea7f2996aa3a3e38d'
+          
+          
+          def run(name, command, allow=False):
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+              (out / (name + '.stdout')).write_bytes(result.stdout)
+              (out / (name + '.stderr')).write_bytes(result.stderr)
+              (out / (name + '.status')).write_text(str(result.returncode) + '\n')
+              print('::group::RAW ' + name, flush=True)
+              sys.stdout.buffer.write(result.stdout)
+              sys.stdout.buffer.write(result.stderr)
+              print('RAW_STATUS', name, result.returncode, flush=True)
+              print('::endgroup::', flush=True)
+              if not allow:
+                  assert result.returncode == 0, (name, result.returncode)
+              return result
+          
+          
+          def tree_guard(expected_tree, head):
+              assert subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip() == head
+              assert subprocess.check_output(['git', 'write-tree']).decode().strip() == expected_tree
+              assert subprocess.call(['git', 'diff-files', '--quiet']) == 0
+              for entry in subprocess.check_output(['git', 'ls-files', '-s', '-z']).split(b'\0'):
+                  if entry:
+                      metadata, path = entry.split(b'\t', 1)
+                      mode, blob, stage = metadata.split()
+                      data = Path(os.fsdecode(path)).read_bytes()
+                      assert hashlib.sha1(('blob %d\0' % len(data)).encode() + data).hexdigest() == blob.decode()
+              print('DOCS_SOURCE_GUARD', head, expected_tree, flush=True)
+          
+          
+          run('docs-dependencies', [sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '-r', 'requirements-docs.txt', 'build', 'wheel', 'ruff'])
+          run('docs-packages', [sys.executable, '-m', 'pip', 'list', '--format=freeze'])
+          run('docs-reset-base', ['git', 'reset', '--hard', base])
+          tree_guard('d936d5754ffad5461d94b7cc67a8d751c36aebdd', base)
+          run('baseline-docs-build', [sys.executable, '-m', 'build'])
+          run('baseline-docs', [sys.executable, '-m', 'sphinx', '-W', '-b', 'singlehtml', '-d', str(out / 'base-doctrees'), 'docs', str(out / 'base-singlehtml')])
+          run('docs-reset-bad-pr', ['git', 'reset', '--hard', old])
+          old_lint = run('bad-pr-ruff', [sys.executable, '-m', 'ruff', 'check', '--output-format=json', 'petl/transform/joins.py', 'petl/test/transform/test_joins.py'], allow=True)
+          assert old_lint.returncode in (0, 1)
+          run('docs-apply-reviewed-repair', ['git', 'apply', str(out / 'repair.patch')])
+          run('docs-index-reviewed-candidate', ['git', 'add', '-u'])
+          tree_guard('189e3aaf0c0ae540152ccd70395edbbd8000d7e0', old)
+          run('candidate-docs-build', [sys.executable, '-m', 'build'])
+          run('candidate-docs', [sys.executable, '-m', 'sphinx', '-W', '-b', 'singlehtml', '-d', str(out / 'candidate-doctrees'), 'docs', str(out / 'candidate-singlehtml')])
+          new_lint = run('candidate-ruff', [sys.executable, '-m', 'ruff', 'check', '--output-format=json', 'petl/transform/joins.py', 'petl/test/transform/test_joins.py'], allow=True)
+          assert new_lint.returncode in (0, 1)
+          from collections import Counter
+          
+          
+          def diagnostics(result):
+              return Counter((Path(item['filename']).relative_to(Path.cwd()).as_posix(), item['code'], item['message']) for item in json.loads(result.stdout))
+          
+          
+          assert not (diagnostics(new_lint) - diagnostics(old_lint)), 'New changed-file Ruff diagnostics'
+          print('RUFF_BASELINE_COMPARISON', old_lint.returncode, new_lint.returncode, flush=True)
+          tree_guard('189e3aaf0c0ae540152ccd70395edbbd8000d7e0', old)
+          print('DOCS_AND_LINT_GATES_PASSED', flush=True)
+          DOCS_SOURCE
+          python "$AUDIT_ROOT/docs.py"
