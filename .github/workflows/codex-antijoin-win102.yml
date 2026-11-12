@@ -1,0 +1,83 @@
+name: PETL810 Windows legacy repaired bootstrap102
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: windows-2022
+          python: 3.6.8
+          mode: basic
+          scope: basic
+          legacy: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_PYTHON: ${{ matrix.python }}
+      TEST_MODE: ${{ matrix.mode }}
+      TEST_SCOPE: ${{ matrix.scope }}
+      DISABLE_BLOSC_AVX2: '1'
+    steps:
+    - name: Initialize free-runner paths and exact-byte checkout
+      run: 'mkdir -p "$RUNNER_TEMP/petl-native102"
+
+        echo "AUDIT_ROOT=$RUNNER_TEMP/petl-native102" >> "$GITHUB_ENV"
+
+        echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
+
+        echo "PYTHONIOENCODING=utf-8" >> "$GITHUB_ENV"
+
+        echo "PYTHONDONTWRITEBYTECODE=1" >> "$GITHUB_ENV"
+
+        echo "PYTHONHASHSEED=42" >> "$GITHUB_ENV"
+
+        echo "PYTHONTRACEMALLOC=1" >> "$GITHUB_ENV"
+
+        git config --global core.autocrlf false
+
+        '
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: peterolkhov/petl
+        ref: 3049bbddae65967eef93c40ea7f2996aa3a3e38d
+        path: package
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Install Linux format-build tools
+      if: runner.os == 'Linux'
+      run: 'sudo apt-get update
+
+        sudo apt-get install -y --no-install-recommends python3-h5py
+
+        '
+    - name: Set up actual legacy CPython without caches
+      if: matrix.legacy
+      uses: MatteoH2O1999/setup-python@1af1a6d642d3bc9b322c25d2e71378a213e41234
+      with:
+        python-version: ${{ matrix.python }}
+        cache-build: false
+    - name: Set up actual modern CPython without caches
+      if: ${{ !matrix.legacy }}
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+      with:
+        python-version: ${{ matrix.python }}
+    - name: Bind semantic runtime environment
+      run: "if [[ \"${{ matrix.python }}\" == 2.* ]]; then\n  echo 'PY_MAJOR_VERSION=py2' >> \"$GITHUB_ENV\"\nelse\n  echo 'PY_MAJOR_VERSION=py3' >> \"$GITHUB_ENV\"\nfi\npython --version\npython -m pip --version\n"
+    - name: Write exact reviewed repair bytes
+      run: "python - <<'PATCH_BYTES'\nimport base64, hashlib, os\npatch = base64.b64decode('LS0tIGEvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKKysrIGIvcGV0bC90cmFuc2Zvcm0vam9pbnMucHkKQEAgLTYyOSwxMiArNjI5LDE0IEBACiAgICAgbGdpdCA9IGl0ZXJ0b29scy5ncm91cGJ5KGxpdCwga2V5PWxnZXRrKQogICAgIHJnaXQgPSBpdGVydG9vbHMuZ3JvdXBieShyaXQsIGtleT1yZ2V0aykKICAgICBscm93Z3JwID0gW10KKyAgICBsZ3JwX3BlbmRpbmcgPSBGYWxzZQogCiAgICAgIyBsb29wIHVudGlsICplaXRoZXIqIG9mIHRoZSBpdGVyYXRvcnMgaXMgZXhoYXVzdGVkCiAgICAgdHJ5OgogCiAgICAgICAgICMgcGljayBvZmYgaW5pdGlhbCByb3cgZ3JvdXBzCiAgICAgICAgIGxrdmFsLCBscm93Z3JwID0gbmV4dChsZ2l0KQorICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgIHJrdmFsLCBfID0gbmV4dChyZ2l0KQogCiAgICAgICAgIHdoaWxlIFRydWU6CkBAIC02NDIsMjIgKzY0NCwyNiBAQAogICAgICAgICAgICAgICAgIGZvciByb3cgaW4gbHJvd2dycDoKICAgICAgICAgICAgICAgICAgICAgeWllbGQgdHVwbGUocm93KQogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBsZWZ0CisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICBlbGlmIGxrdmFsID4gcmt2YWw6CiAgICAgICAgICAgICAgICAgIyBhZHZhbmNlIHJpZ2h0CiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICMgYWR2YW5jZSBib3RoCisgICAgICAgICAgICAgICAgbGdycF9wZW5kaW5nID0gRmFsc2UKICAgICAgICAgICAgICAgICBsa3ZhbCwgbHJvd2dycCA9IG5leHQobGdpdCkKKyAgICAgICAgICAgICAgICBsZ3JwX3BlbmRpbmcgPSBUcnVlCiAgICAgICAgICAgICAgICAgcmt2YWwsIF8gPSBuZXh0KHJnaXQpCiAKICAgICBleGNlcHQgU3RvcEl0ZXJhdGlvbjoKICAgICAgICAgcGFzcwogCi0gICAgIyBBbnkgbWF0Y2hlZCBvciB5aWVsZGVkIGdyb3VwIHdhcyBjb25zdW1lZCB3aGVuIGxnaXQgYWR2YW5jZWQuCi0gICAgIyBEcmFpbiB0aGUgcGVuZGluZyBncm91cCBldmVuIHdoZW4gdGhlIHJpZ2h0IHRhYmxlIHdhcyBlbXB0eS4KLSAgICBmb3Igcm93IGluIGxyb3dncnA6Ci0gICAgICAgIHlpZWxkIHR1cGxlKHJvdykKKyAgICAjIE9ubHkgZHJhaW4gYW4gdW5tYXRjaGVkIGdyb3VwLCBldmVuIGlmIHRoZSByaWdodCB0YWJsZSB3YXMgZW1wdHkuCisgICAgaWYgbGdycF9wZW5kaW5nOgorICAgICAgICBmb3Igcm93IGluIGxyb3dncnA6CisgICAgICAgICAgICB5aWVsZCB0dXBsZShyb3cpCiAgICAgIyBhbmQgdGhlIHJlc3QuLi4KICAgICBmb3IgbGt2YWwsIGxyb3dncnAgaW4gbGdpdDoKICAgICAgICAgZm9yIHJvdyBpbiBscm93Z3JwOgotLS0gYS9wZXRsL3Rlc3QvdHJhbnNmb3JtL3Rlc3Rfam9pbnMucHkKKysrIGIvcGV0bC90ZXN0L3RyYW5zZm9ybS90ZXN0X2pvaW5zLnB5CkBAIC0xMTkxLDYgKzExOTEsMTkgQEAKICAgICBhc3NlcnQgbmV4dChhY3R1YWwpID09IChOb25lLCAxMCkKICAgICBhc3NlcnQgY29uc3VtZWQgPT0gWygnaWQnLCAnYW1vdW50JyksIChOb25lLCAxMCldCiAgICAgaWVxKCgoTm9uZSwgMjApLCAoMiwgMzApKSwgYWN0dWFsKQorCisKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgncHJlc29ydGVkJywgW0ZhbHNlLCBUcnVlXSkKK0BweXRlc3QubWFyay5wYXJhbWV0cml6ZSgnbGVmdCcsIFsKKyAgICAoKCdpZCcsICdhbW91bnQnKSwgKDEsIDEwKSwgKDIsIDIwKSksCisgICAgKCgnaWQnLCAnYW1vdW50JyksICgxLCAxMCksICgyLCAyMCksICgyLCAzMCkpLAorXSkKK2RlZiB0ZXN0X2FudGlqb2luX2ZpbmFsX251bWVyaWNfbWF0Y2gocHJlc29ydGVkLCBsZWZ0KToKKyAgICByaWdodCA9ICgoJ2lkJywpLCAoMiwpKQorICAgIGV4cGVjdCA9ICgoJ2lkJywgJ2Ftb3VudCcpLCAoMSwgMTApKQorICAgIGFjdHVhbCA9IGFudGlqb2luKGxlZnQsIHJpZ2h0LCBrZXk9J2lkJywgcHJlc29ydGVkPXByZXNvcnRlZCkKKyAgICBpZXEoZXhwZWN0LCBhY3R1YWwpCisgICAgaWVxKGV4cGVjdCwgYWN0dWFsKQogCiAKIGRlZiBfdGVzdF9sb29rdXBqb2luXzEobG9va3Vwam9pbl9pbXBsKToK')\nassert hashlib.sha256(patch).hexdigest() == '5d59e93e0f7376aa08766279cf101f17c966cd1fd9f2e647135eac27a93dad52'\nwith open(os.path.join(os.environ['AUDIT_ROOT'], 'repair.patch'), 'wb') as stream:\n    stream.write(patch)\nprint('REVIEWED_REPAIR_PATCH_SHA256', hashlib.sha256(patch).hexdigest())\nPATCH_BYTES\n"
+    - name: Native original-base, actual-bad-PR, numeric RED and repaired GREEN
+      working-directory: package
+      run: "cat > \"$AUDIT_ROOT/native.py\" <<'NATIVE_SOURCE'\nfrom __future__ import print_function\nimport base64\nimport glob\nimport hashlib\nimport json\nimport os\nimport shutil\nimport subprocess\nimport sys\nimport xml.etree.ElementTree as ET\n\nBASE = 'fc8be5bb09c837be76aa22fb26e787bbb43b9f2b'\nOLD = '3049bbddae65967eef93c40ea7f2996aa3a3e38d'\nCANDIDATE_TREE = '189e3aaf0c0ae540152ccd70395edbbd8000d7e0'\nFROZEN = '6fc7332e73771b43260dc47407520fbcc1edffdba879b4280a13da291ffd97cf'\nSOURCE = 'petl/transform/joins.py'\nTESTS = 'petl/test/transform/test_joins.py'\nOUT = os.environ['AUDIT_ROOT']\nFOCUS = ('antijoin_empty_right_none_key or antijoin_none_key_lrkey or '\n         'antijoin_group_exhaustion or antijoin_empty_right_streaming')\nALL31 = FOCUS + ' or antijoin_final_numeric_match'\nlegacy = sys.version_info[:2] in ((2, 7), (3, 6))\nexpected = tuple(int(n) for n in os.environ['EXPECTED_PYTHON'].split('.'))\nassert sys.version_info[:len(expected)] == expected, (sys.version, expected)\nassert sys.implementation.name == 'cpython' if hasattr(sys, 'implementation') else sys.subversion[0] == 'CPython'\nprint('REAL_INTERPRETER', sys.executable, sys.version)\nif not os.path.isdir(OUT):\n    os.makedirs(OUT)\n\n\ndef raw(name, command, env=None, allow=False):\n    stdout_path = os.path.join(OUT, name + '.stdout')\n    stderr_path = os.path.join(OUT, name + '.stderr')\n    with open(stdout_path, 'wb') as stdout, open(stderr_path, 'wb') as stderr:\n        code = subprocess.call(command, stdout=stdout, stderr=stderr, env=env)\n    with open(os.path.join(OUT, name + '.status'), 'w') as status:\n        status.write(str(code) + '\\n')\n    print('::group::RAW ' + name)\n    for path in (stdout_path, stderr_path):\n        print('RAW_FILE', path)\n        sys.stdout.flush()\n        with open(path, 'rb') as stream:\n            data = stream.read()\n        if hasattr(sys.stdout, 'buffer'):\n            sys.stdout.buffer.write(data)\n        else:\n            sys.stdout.write(data)\n        sys.stdout.flush()\n    print('RAW_STATUS', name, code)\n    print('::endgroup::')\n    if not allow:\n        assert code == 0, (name, code)\n    return code\n\n\ndef output(command):\n    return subprocess.check_output(command).decode('utf-8').strip()\n\n\ndef digest(path):\n    with open(path, 'rb') as stream:\n        return hashlib.sha256(stream.read()).hexdigest()\n\n\ndef tree_guard(tree, head):\n    assert output(['git', 'rev-parse', 'HEAD']) == head\n    assert output(['git', 'write-tree']) == tree\n    assert subprocess.call(['git', 'diff-files', '--quiet']) == 0\n    for entry in subprocess.check_output(['git', 'ls-files', '-s', '-z']).split(b'\\0'):\n        if not entry:\n            continue\n        metadata, path = entry.split(b'\\t', 1)\n        mode, blob, stage = metadata.split()\n        assert stage == b'0'\n        with open(path.decode('utf-8'), 'rb') as tracked:\n            data = tracked.read()\n        actual = hashlib.sha1(('blob %d\\0' % len(data)).encode('ascii') + data).hexdigest()\n        assert actual == blob.decode('ascii'), path\n    print('SOURCE_GUARD', json.dumps(dict(head=head, index_tree=tree,\n          joins_sha256=digest(SOURCE), tests_sha256=digest(TESTS)), sort_keys=True))\n\n\ndef freeze_guard():\n    with open(TESTS, 'rb') as stream:\n        data = stream.read()\n    start = data.index(b\"@pytest.mark.parametrize('presorted', [False, True])\", data.index(b'def test_antijoin():'))\n    block = data[start:start + 2669]\n    assert hashlib.sha256(block).hexdigest() == FROZEN, hashlib.sha256(block).hexdigest()\n    print('FROZEN27', FROZEN, len(block))\n\n\ndef build(name):\n    for path in ['build', 'dist', 'petl.egg-info']:\n        if os.path.isdir(path):\n            shutil.rmtree(path)\n    raw(name + '-build', [sys.executable, '-m', 'build'])\n    wheels = glob.glob('dist/*.whl')\n    assert len(wheels) == 1, wheels\n    raw(name + '-install', [sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--force-reinstall', '--no-deps', wheels[0]])\n\n\ndef tests(name, args, failures=0, count=None):\n    xml = os.path.join(OUT, name + '.xml')\n    env = os.environ.copy()\n    env['AUDIT_JOINS_SHA256'] = digest(SOURCE)\n    env['AUDIT_TESTS_SHA256'] = digest(TESTS)\n    env['AUDIT_PACKAGE_DIR'] = os.getcwd()\n    env['PYTHONPATH'] = OUT + os.pathsep + os.getcwd()\n    code = raw(name, [sys.executable, '-m', 'pytest', '-p', 'native_guard', '-v', '-ra'] + args + ['--junitxml=' + xml], env=env, allow=True)\n    cases = list(ET.parse(xml).iter('testcase'))\n    bad = [c for c in cases if c.find('failure') is not None]\n    errors = [c for c in cases if c.find('error') is not None]\n    skipped = [c for c in cases if c.find('skipped') is not None]\n    summary = dict(name=name, exit_code=code, total=len(cases), failures=len(bad), errors=len(errors), skipped=len(skipped))\n    print('NATIVE_GATE', json.dumps(summary, sort_keys=True))\n    assert code == (1 if failures else 0), summary\n    assert len(bad) == failures and not errors, summary\n    if count is not None:\n        assert len(cases) == count and not skipped, summary\n    if failures:\n        for case in bad:\n            case_name = case.attrib['name']\n            assert any(n in case_name for n in ('test_antijoin_none_key_lrkey[right3-', 'test_antijoin_group_exhaustion[left2-', 'test_antijoin_final_numeric_match[')), case_name\n            assert 'AssertionError' in (case.find('failure').text or ''), case_name\n    return summary\n\n\nmode = [] if os.environ['TEST_MODE'] == 'basic' else ['--doctest-modules']\nfull = mode + ['--cov=petl', '--durations=10', 'petl']\nbootstrap_env = os.environ.copy()\nbootstrap_env.pop('PIP_NO_CACHE_DIR', None)\nraw('pip-upgrade', [sys.executable, '-m', 'pip', '--no-cache-dir', 'install', '--upgrade', 'pip'], env=bootstrap_env)\nraw('test-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-tests.txt'])\nraw('build-dependencies', [sys.executable, '-m', 'pip', 'install', '--upgrade', 'build', 'setuptools', 'wheel'])\nif os.environ['TEST_SCOPE'] == 'full':\n    raw('format-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-formats.txt'])\nif not legacy:\n    # Matches upstream's explicitly nonfatal optional dependency installation.\n    raw('optional-dependencies', [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '-r', 'requirements-optional.txt'], allow=True)\nraw('installed-packages', [sys.executable, '-m', 'pip', 'list', '--format=freeze'])\nprint('SERVICE_SCOPE: no database/SMB/SFTP services or requirements enabled; all pytest skips and optional-install status retained. Not the complete upstream service matrix.')\n\n# Compile and consume this guard as a normal pytest plugin inside each fresh process.\nguard = '''import hashlib, inspect, os, sys\\nimport petl\\nimport petl.transform.joins as joins\\ndef pytest_sessionstart(session):\\n    root = os.path.realpath(os.environ['AUDIT_PACKAGE_DIR'])\\n    assert os.path.realpath(petl.__file__).startswith(root + os.sep)\\n    path = os.path.join(root, 'petl', 'transform', 'joins.py')\\n    tests = os.path.join(root, 'petl', 'test', 'transform', 'test_joins.py')\\n    assert hashlib.sha256(open(path, 'rb').read()).hexdigest() == os.environ['AUDIT_JOINS_SHA256']\\n    assert hashlib.sha256(open(tests, 'rb').read()).hexdigest() == os.environ['AUDIT_TESTS_SHA256']\\n    fn = joins.iterantijoin\\n    code = getattr(fn, '__code__', None) or fn.func_code\\n    compiled = compile(open(path, 'rb').read(), code.co_filename, 'exec', 0, True)\\n    expected = [c for c in compiled.co_consts if inspect.iscode(c) and c.co_name == 'iterantijoin'][0]\\n    for attr in ('co_code', 'co_consts', 'co_names', 'co_varnames', 'co_firstlineno'):\\n        assert getattr(code, attr) == getattr(expected, attr), attr\\n    assert petl.antijoin is joins.antijoin\\n    print('CONSUMED_RUNTIME_GUARD', sys.version, petl.__file__, joins.__file__, os.environ['AUDIT_JOINS_SHA256'], os.environ['AUDIT_TESTS_SHA256'])\\n'''\nwith open(os.path.join(OUT, 'native_guard.py'), 'w') as stream:\n    stream.write(guard)\n\nraw('reset-original-base', ['git', 'reset', '--hard', BASE])\ntree_guard('d936d5754ffad5461d94b7cc67a8d751c36aebdd', BASE)\nbuild('original-base')\ntests('original-base-full', full)\ntree_guard('d936d5754ffad5461d94b7cc67a8d751c36aebdd', BASE)\nraw('reset-actual-bad-pr', ['git', 'reset', '--hard', OLD])\ntree_guard('65f2bfd13278b3bf7fa470ee8f76487283458d05', OLD)\nfreeze_guard()\nbuild('actual-bad-pr')\ntests('bad-pr-frozen27', [TESTS, '-k', FOCUS], 4 if legacy else 0, 27)\ntests('bad-pr-full', full, 4 if legacy else 0)\n# Apply the exact reviewed patch, preserve candidate files, then expose numeric\n# cases to actual bad production without changing any frozen expected output.\nraw('apply-reviewed-repair', ['git', 'apply', os.path.join(OUT, 'repair.patch')])\nraw('index-reviewed-candidate', ['git', 'add', '-u'])\ntree_guard(CANDIDATE_TREE, OLD)\nfreeze_guard()\nwith open(SOURCE, 'rb') as stream:\n    candidate_source = stream.read()\nwith open(TESTS, 'rb') as stream:\n    candidate_tests = stream.read()\nraw('reset-numeric-control-to-bad-pr', ['git', 'reset', '--hard', OLD])\nwith open(TESTS, 'wb') as stream:\n    stream.write(candidate_tests)\nraw('index-numeric-control', ['git', 'add', '-u'])\nprint('BAD31_CONTROL_TREE', output(['git', 'write-tree']))\nfreeze_guard()\ntests('bad-pr-all31', [TESTS, '-k', ALL31], 8 if legacy else 0, 31)\nwith open(SOURCE, 'wb') as stream:\n    stream.write(candidate_source)\nraw('index-restored-candidate', ['git', 'add', '-u'])\ntree_guard(CANDIDATE_TREE, OLD)\nbuild('repaired-candidate')\ntests('repaired-frozen27', [TESTS, '-k', FOCUS], 0, 27)\ntests('repaired-all31', [TESTS, '-k', ALL31], 0, 31)\ntests('repaired-joins', [TESTS])\ntests('repaired-full', full)\ntree_guard(CANDIDATE_TREE, OLD)\nprint('ALL_REQUIRED_NATIVE_GATES_PASSED')\nNATIVE_SOURCE\npython \"$AUDIT_ROOT/native.py\"\n"
+    - name: Retain raw file inventory and independent final status
+      if: always()
+      run: "python - <<'INVENTORY'\nimport hashlib, os\nroot = os.environ['AUDIT_ROOT']\nfor name in sorted(os.listdir(root)):\n    path = os.path.join(root, name)\n    if os.path.isfile(path):\n        data = open(path, 'rb').read()\n        print('RAW_INVENTORY', name, len(data), hashlib.sha256(data).hexdigest())\nINVENTORY\n"
+'on':
+  push:
+    branches:
+    - codex/verify-antijoin-win102
+  workflow_dispatch: null
