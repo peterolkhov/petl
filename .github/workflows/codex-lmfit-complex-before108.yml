@@ -239,14 +239,25 @@ jobs:
                              Path(sys.executable).resolve(), destination/'probe-before.py',
                              destination/'probe-guard.py', destination/'probe-assess.py']:
                   collect(parent, consumed)
-              for command in ['git', 'ldd']:
+              for command in ['git', 'ldd', 'nm']:
                   executable = shutil.which(command)
                   if executable is None:
                       raise RuntimeError('missing guard tool: '+command)
                   collect(Path(executable).resolve(), consumed)
               binaries = [Path(sys.executable).resolve()]
-              binaries.extend(Path(name) for name, item in consumed.items()
-                              if item['type'] == 'file' and (name.endswith('.so') or '.so.' in name))
+              extension_symbols = {}
+              for name, item in consumed.items():
+                  if item['type'] != 'file' or not (name.endswith('.so') or '.so.' in name):
+                      continue
+                  process = subprocess.run(['nm', '-D', '--defined-only', name],
+                                           capture_output=True, text=True)
+                  if process.returncode != 0:
+                      raise RuntimeError('ELF export scan failed: '+name+' '+process.stderr)
+                  symbols = sorted(line.split()[-1] for line in process.stdout.splitlines()
+                                   if line.split() and line.split()[-1].startswith('PyInit_'))
+                  if symbols:
+                      extension_symbols[name] = symbols
+                      binaries.append(Path(name))
               linked = {}
               for binary in sorted(set(binaries)):
                   process = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
@@ -258,7 +269,9 @@ jobs:
                       if word.startswith('/') and Path(word).is_file():
                           path = Path(word).resolve()
                           linked[str(path)] = file_record(path)
-              data.update(consumed=consumed, linked=linked, executable=str(Path(sys.executable).resolve()),
+              data.update(consumed=consumed, linked=linked, extension_symbols=extension_symbols,
+                          elf_roots=sorted(str(binary) for binary in set(binaries)),
+                          executable=str(Path(sys.executable).resolve()),
                           prefix=sys.prefix, base_prefix=sys.base_prefix)
           if stage == 'source':
               (destination/'guard-source.json').write_text(json.dumps(data, sort_keys=True))
@@ -285,7 +298,9 @@ jobs:
               'tracked_sha256': hashlib.sha256(json.dumps(tracked, sort_keys=True).encode()).hexdigest(),
               'consumed_count': len(data.get('consumed', {})),
               'consumed_sha256': hashlib.sha256(json.dumps(data.get('consumed', {}), sort_keys=True).encode()).hexdigest(),
-              'linked_count': len(data.get('linked', {})), 'unchanged': True,
+              'linked_count': len(data.get('linked', {})),
+              'elf_root_count': len(data.get('elf_roots', [])),
+              'extension_root_count': len(data.get('extension_symbols', {})), 'unchanged': True,
           }), flush=True)
           NEW108_PROBE_GUARD_PY
           cat > "$NEW108_EVIDENCE/probe-assess.py" <<'NEW108_PROBE_ASSESS_PY'
@@ -346,7 +361,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/new108-venv"
           echo "$RUNNER_TEMP/new108-venv/bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/new108-venv/bin:$PATH"
-          python -m pip install pip==25.0.1 setuptools==75.8.0 setuptools-scm==8.2.0 wheel==0.45.1 packaging==24.2
+          python -m pip install pip==25.0.1 setuptools==77.0.3 setuptools-scm==8.2.0 wheel==0.45.1 packaging==24.2
           python -m pip install numpy==2.0.0 scipy==1.14.0 asteval==1.0.0 uncertainties==3.2.2 dill==0.3.8
           python -m pip install --no-deps --no-build-isolation -e .
           python -m pip list
