@@ -1,0 +1,76 @@
+name: PETL remaining lint and docs gates
+on:
+  push:
+    branches: [codex/validate-antijoin-remaining]
+permissions:
+  contents: read
+jobs:
+  remaining:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.13', '3.14']
+    env:
+      PIP_NO_CACHE_DIR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_PIN: 9cc6c751e0a68c034b270478599cb1be351c530e
+      CANDIDATE_SHA: f2bf9f7245b4eb23f2e045d86f2cf10869e595c8
+    defaults:
+      run:
+        working-directory: package
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: peterolkhov/petl
+          ref: f2bf9f7245b4eb23f2e045d86f2cf10869e595c8
+          path: package
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install exact previously observed project-declared Ruff
+        run: python -m pip install --no-cache-dir 'ruff==0.17.4'
+      - name: Compare original and candidate lint diagnostics
+        run: |
+          python - <<'PYCODE'
+          from collections import Counter
+          import json, os, subprocess, sys
+          from pathlib import Path
+          paths = [Path('petl/transform/joins.py'), Path('petl/test/transform/test_joins.py')]
+          saved = {p: p.read_bytes() for p in paths}
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['CANDIDATE_SHA']
+          assert subprocess.check_output(['git','diff','--name-only','HEAD'],text=True) == ''
+          def lint():
+              r = subprocess.run([sys.executable,'-m','ruff','check','--output-format=json']+[str(p) for p in paths],text=True,capture_output=True)
+              assert r.returncode in (0,1),r.stderr
+              signatures = Counter()
+              for item in json.loads(r.stdout):
+                  p = Path(item['filename']).resolve()
+                  line = p.read_text().splitlines()[item['location']['row']-1]
+                  signatures[(str(p.relative_to(Path.cwd().resolve())),item['code'],item['message'],line)] += 1
+              return signatures
+          try:
+              for p in paths:
+                  p.write_bytes(subprocess.check_output(['git','show',os.environ['BASE_PIN']+':'+str(p)]))
+              baseline = lint()
+          finally:
+              for p,data in saved.items():
+                  p.write_bytes(data)
+          candidate = lint()
+          report = dict(baseline_diagnostics=sum(baseline.values()),candidate_diagnostics=sum(candidate.values()),new_diagnostics=sum((candidate-baseline).values()),signatures=[dict(filename=k[0],code=k[1],message=k[2],source_line=k[3],count=v)for k,v in candidate.items()])
+          print('PETL_LINT_BASELINE_COMPARISON='+json.dumps(report,sort_keys=True))
+          assert baseline == candidate
+          assert sum(baseline.values()) == 5
+          assert all(p.read_bytes()==data for p,data in saved.items())
+          assert subprocess.check_output(['git','diff','--name-only','HEAD'],text=True)==''
+          PYCODE
+      - name: Build docs with warnings as errors
+        if: matrix.python == '3.13'
+        run: |
+          python -m pip install --prefer-binary --no-cache-dir -e . -r requirements-docs.txt
+          python -m sphinx -W -b singlehtml -d "$RUNNER_TEMP/petl-doctrees" docs "$RUNNER_TEMP/petl-singlehtml"
+      - name: Assert tracked candidate files remain unchanged
+        run: git diff --exit-code HEAD
