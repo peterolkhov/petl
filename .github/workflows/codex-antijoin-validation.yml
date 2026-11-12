@@ -1,0 +1,199 @@
+name: Validate anti-join pending rows
+
+on:
+  push:
+    branches: [codex/validate-antijoin-none-rows]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.13', '3.14']
+    env:
+      PYTHONHASHSEED: '42'
+      PY_MAJOR_VERSION: py3
+      PIP_NO_CACHE_DIR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_PIN: 9cc6c751e0a68c034b270478599cb1be351c530e
+      CANDIDATE_SHA: f2bf9f7245b4eb23f2e045d86f2cf10869e595c8
+    defaults:
+      run:
+        working-directory: package
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: peterolkhov/petl
+          ref: f2bf9f7245b4eb23f2e045d86f2cf10869e595c8
+          path: package
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pinned-project test and format dependencies
+        run: python -m pip install --prefer-binary --no-cache-dir -e . -r requirements-tests.txt -r requirements-formats.txt 'ruff>=0.3'
+      - name: Verify exact candidate and full editable package import
+        run: |
+          python - <<'PYCODE'
+          import os, pathlib, subprocess, sys
+          import petl
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['CANDIDATE_SHA']
+          assert subprocess.check_output(['git', 'diff', '--name-only', 'HEAD'], text=True) == ''
+          assert pathlib.Path(petl.__file__).resolve() == pathlib.Path('petl/__init__.py').resolve()
+          print('Python:', sys.version)
+          print('Imported complete editable PETL:', petl.__file__)
+          PYCODE
+      - name: Preserve the original public twelve-case fixture byte for byte
+        run: |
+          mkdir -p "$RUNNER_TEMP/petl-public-fixture"
+          cat > "$RUNNER_TEMP/petl-public-fixture/test_antijoin.py" <<'PUBLIC_FIXTURE'
+          """Proposed native PETL anti-join regressions; not run by diagnostic lane."""
+          
+          import petl as etl
+          import pytest
+          
+          
+          @pytest.mark.parametrize("presorted", [False, True])
+          @pytest.mark.parametrize("rows", [
+              [(None, 10)],
+              [(None, 10), (None, 20)],
+              [(None, 10), (None, 20), (2, 30)],
+          ])
+          def test_antijoin_empty_right_preserves_none_group(presorted, rows):
+              left = [("id", "amount")] + rows
+              right = [("id",)]
+              result = list(etl.antijoin(left, right, key="id", presorted=presorted))
+              assert result == left
+              assert sum(row[1] for row in result[1:]) == sum(row[1] for row in rows)
+          
+          
+          @pytest.mark.parametrize("presorted", [False, True])
+          def test_antijoin_empty_right_preserves_separate_key_none_group(presorted):
+              left = [("id", "amount"), (None, 10), (None, 20), (2, 30)]
+              right = [("reference",)]
+              result = list(etl.antijoin(left, right, lkey="id", rkey="reference",
+                                         presorted=presorted))
+              assert result == left
+          
+          
+          @pytest.mark.parametrize("presorted", [False, True])
+          def test_antijoin_nonempty_right_still_removes_matching_none(presorted):
+              left = [("id", "amount"), (None, 10), (None, 20), (2, 30)]
+              right = [("id",), (None,)]
+              assert list(etl.antijoin(left, right, key="id", presorted=presorted)) == [
+                  ("id", "amount"), (2, 30)
+              ]
+          
+          
+          @pytest.mark.parametrize("presorted", [False, True])
+          def test_antijoin_empty_left_and_right_control(presorted):
+              assert list(etl.antijoin([("id", "amount")], [("id",)], key="id",
+                                      presorted=presorted)) == [("id", "amount")]
+          PUBLIC_FIXTURE
+      - name: Prove native assertions fail before and all gates pass after
+        run: |
+          python - <<'PYCODE'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+
+          base = os.environ['BASE_PIN']
+          tmp = Path(os.environ['RUNNER_TEMP'])
+          source = Path('petl/transform/joins.py')
+          tests = Path('petl/test/transform/test_joins.py')
+          saved = {path: path.read_bytes() for path in (source, tests)}
+          focused = ('antijoin_empty_right_none_key or antijoin_none_key_lrkey or '
+                     'antijoin_group_exhaustion or antijoin_empty_right_streaming')
+          results = {}
+
+          def run_tests(name, args, expected_code=0):
+              xml = tmp / (name + '.xml')
+              command = [sys.executable, '-m', 'pytest', '-v'] + args + ['--junitxml=' + str(xml)]
+              result = subprocess.run(command)
+              assert result.returncode == expected_code, (name, result.returncode)
+              cases = list(ET.parse(xml).iter('testcase'))
+              failures = [case for case in cases if case.find('failure') is not None]
+              errors = [case for case in cases if case.find('error') is not None]
+              skipped = [case for case in cases if case.find('skipped') is not None]
+              results[name] = dict(exit_code=result.returncode, tests=len(cases),
+                                   failures=len(failures), errors=len(errors),
+                                   skipped=len(skipped), passed=len(cases)-len(failures)-len(errors)-len(skipped))
+              print('PETL_GATE', name, json.dumps(results[name]), flush=True)
+              return failures
+
+          try:
+              source.write_bytes(subprocess.check_output(['git', 'show', base + ':' + str(source)]))
+              failures = run_tests('red-native', [str(tests), '-k', focused], 1)
+              assert results['red-native'] == dict(exit_code=1, tests=27, failures=9, errors=0, skipped=0, passed=18)
+              assert all('AssertionError' in case.find('failure').get('message', '') for case in failures)
+              tests.write_bytes(subprocess.check_output(['git', 'show', base + ':' + str(tests)]))
+              run_tests('baseline-full', ['--doctest-modules', '--cov=petl', '--cov-branch',
+                         '--cov-report=json:' + str(tmp / 'baseline-coverage.json'),
+                         '--cov-report=term', 'petl'])
+          finally:
+              for path, data in saved.items():
+                  path.write_bytes(data)
+
+          run_tests('green-native', [str(tests), '-k', focused])
+          assert results['green-native'] == dict(exit_code=0, tests=27, failures=0, errors=0, skipped=0, passed=27)
+          fixture = tmp / 'petl-public-fixture/test_antijoin.py'
+          assert hashlib.sha256(fixture.read_bytes()).hexdigest() == 'a562098d63606b03567582372ae4acf3e53d77911b5020b3cb8805c417298b89'
+          run_tests('public-fixture-after', [str(fixture)])
+          assert results['public-fixture-after'] == dict(exit_code=0, tests=12, failures=0, errors=0, skipped=0, passed=12)
+          run_tests('green-joins', [str(tests)])
+          run_tests('candidate-full', ['--doctest-modules', '--cov=petl', '--cov-branch',
+                     '--cov-report=json:' + str(tmp / 'candidate-coverage.json'),
+                     '--cov-report=term-missing', 'petl'])
+
+          def source_coverage(filename):
+              files = json.loads(filename.read_text())['files']
+              summaries = [item['summary'] for path, item in files.items()
+                           if '/test/' not in path.replace('\\', '/')]
+              totals = {key: sum(item[key] for item in summaries)
+                        for key in ('covered_lines', 'num_statements', 'missing_lines',
+                                    'covered_branches', 'num_branches', 'missing_branches')}
+              totals['line_percent'] = 100 * totals['covered_lines'] / totals['num_statements']
+              totals['branch_percent'] = 100 * totals['covered_branches'] / totals['num_branches']
+              totals['joins'] = next(item['summary'] for path, item in files.items()
+                                    if path.replace('\\', '/').endswith('petl/transform/joins.py'))
+              return totals
+
+          before = source_coverage(tmp / 'baseline-coverage.json')
+          after = source_coverage(tmp / 'candidate-coverage.json')
+          results['source_coverage'] = dict(before=before, after=after)
+          assert after['missing_lines'] <= before['missing_lines']
+          assert after['missing_branches'] <= before['missing_branches']
+          import petl
+          examples = []
+          for presorted in (False, True):
+              left = [('id', 'amount'), (None, 10), (None, 20), (2, 30)]
+              actual = list(petl.antijoin(left, [('id',)], key='id', presorted=presorted))
+              total = sum(row[1] for row in actual[1:])
+              assert actual == left and total == 60
+              examples.append(dict(presorted=presorted, actual=actual, actual_amount_total=total))
+          results['actual_examples'] = examples
+          results['candidate'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          results['module_file'] = petl.__file__
+          results['python'] = sys.version
+          assert subprocess.check_output(['git', 'diff', '--name-only', 'HEAD'], text=True) == ''
+          print('PETL_VALIDATION_RESULT=' + json.dumps(results, sort_keys=True), flush=True)
+          PYCODE
+      - name: Lint touched Python files using project Ruff configuration
+        run: python -m ruff check petl/transform/joins.py petl/test/transform/test_joins.py
+      - name: Build docs with warnings as errors
+        if: matrix.python == '3.13'
+        run: |
+          python -m pip install --prefer-binary --no-cache-dir -r requirements-docs.txt
+          python -m sphinx -W -b singlehtml -d "$RUNNER_TEMP/petl-doctrees" docs "$RUNNER_TEMP/petl-singlehtml"
+      - name: Assert candidate files remain unchanged
+        run: git diff --exit-code HEAD
