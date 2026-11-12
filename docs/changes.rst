@@ -4,6 +4,9 @@ Changes
 Version 1.7.32
 --------------
 
+* Preserve every left row in ``antijoin()`` when the right table is empty,
+  including an initial group whose key is ``None``.
+
 * Use PETL's mixed-type ordering for variable names discovered by
   ``recast()``, allowing tables with mixed-type headers to be melted and
   recast without a comparison error.
