@@ -1,5 +1,8 @@
 name: Observe original Floating UI closed-selection typeahead
 on:
+  push:
+    branches: ["codex/observe-floating-typeahead182"]
+    paths: [".github/workflows/observe-floating-typeahead182.yml"]
   workflow_dispatch:
 permissions:
   contents: read
