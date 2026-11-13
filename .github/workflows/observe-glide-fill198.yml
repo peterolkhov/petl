@@ -1,0 +1,237 @@
+name: Observe original Glide backward fill phase
+on:
+  push:
+    branches: ["codex/observe-glide-fill198"]
+    paths: [".github/workflows/observe-glide-fill198.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  original:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out complete pinned original Glide project
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: glideapps/glide-data-grid
+          ref: 0875d78cc41535a39f8b417ff88ce1ebe129c363
+          path: glide
+          persist-credentials: false
+      - name: Set up official CI Node version
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20.10.0
+      - name: Place frozen public DataEditor observation and source guards
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat > glide/packages/core/test/backward-fill-phase198.test.tsx <<'FROZEN_FIXTURE'
+          // Frozen original-source observation. No fill implementation is called directly.
+          import * as React from "react";
+          import { render, fireEvent, screen } from "@testing-library/react";
+          import { GridCellKind, type GridSelection } from "../src/index.js";
+          import { beforeEach, afterEach, expect, test, vi } from "vitest";
+          import { EventedDataEditor, Context, prep, sendClick, standardBeforeEach, standardAfterEach } from "./test-utils.js";
+          
+          vi.mock("../src/common/resize-detector", () => ({
+              useResizeDetector: () => ({ ref: undefined, width: 1000, height: 1000 }),
+          }));
+          
+          beforeEach(standardBeforeEach);
+          afterEach(() => { standardAfterEach(); vi.useRealTimers(); });
+          
+          type Scenario = {
+              id: string;
+              axis: "vertical" | "horizontal";
+              target: number;
+              indices: number[];
+              expected: string[];
+              destination: { x: number; y: number; width: number; height: number };
+          };
+          
+          // Literal oracles extend the selected Day/Night sequence across its boundary.
+          // They do not import, reproduce, or calculate the target's pattern indexing.
+          const scenarios: Scenario[] = [
+              { id: "up3", axis: "vertical", target: 1, indices: [1, 2, 3], expected: ["Night", "Day", "Night"], destination: { x: 4, y: 1, width: 1, height: 5 } },
+              { id: "left3", axis: "horizontal", target: 1, indices: [1, 2, 3], expected: ["Night", "Day", "Night"], destination: { x: 1, y: 4, width: 5, height: 1 } },
+              { id: "down3", axis: "vertical", target: 8, indices: [6, 7, 8], expected: ["Day", "Night", "Day"], destination: { x: 4, y: 4, width: 1, height: 5 } },
+              { id: "right3", axis: "horizontal", target: 8, indices: [6, 7, 8], expected: ["Day", "Night", "Day"], destination: { x: 4, y: 4, width: 5, height: 1 } },
+              { id: "up2", axis: "vertical", target: 2, indices: [2, 3], expected: ["Day", "Night"], destination: { x: 4, y: 2, width: 1, height: 4 } },
+              { id: "left2", axis: "horizontal", target: 2, indices: [2, 3], expected: ["Day", "Night"], destination: { x: 2, y: 4, width: 4, height: 1 } },
+          ];
+          
+          for (const scenario of scenarios) {
+              test(`glide198 ${scenario.id} source anchored saved values`, () => {
+                  vi.useFakeTimers();
+                  const vertical = scenario.axis === "vertical";
+                  const initial = Array.from({ length: 10 }, () => Array.from({ length: 10 }, () => "unfilled"));
+                  initial[4][4] = "Day";
+                  initial[vertical ? 5 : 4][vertical ? 4 : 5] = "Night";
+                  const emitted: Array<[number, number, string]> = [];
+                  const fills: unknown[] = [];
+                  let selection: GridSelection | undefined;
+                  function SavedGrid() {
+                      const [saved, setSaved] = React.useState(initial);
+                      return <>
+                          <pre data-testid="saved-grid">{JSON.stringify(saved)}</pre>
+                          <EventedDataEditor
+                              width={1000} height={1000}
+                              columns={Array.from({ length: 10 }, (_, c) => ({ title: `Shift ${c}`, width: 80 }))}
+                              rows={10} headerHeight={36} rowHeight={32}
+                              fillHandle={true} allowedFillDirections={scenario.axis}
+                              getCellsForSelection={true}
+                              getCellContent={([c, r]) => ({ kind: GridCellKind.Text, allowOverlay: true, data: saved[r][c], displayData: saved[r][c] })}
+                              onGridSelectionChange={next => { selection = next; }}
+                              onFillPattern={event => { fills.push({ patternSource: event.patternSource, fillDestination: event.fillDestination }); }}
+                              onCellsEdited={edits => {
+                                  const next = saved.map(row => [...row]);
+                                  for (const { location: [c, r], value } of edits) {
+                                      if (value.kind !== GridCellKind.Text) throw new Error("Unexpected nontext edit");
+                                      emitted.push([c, r, value.data]);
+                                      next[r][c] = value.data;
+                                  }
+                                  setSaved(next);
+                                  return true;
+                              }}
+                          />
+                      </>;
+                  }
+                  render(<SavedGrid />, { wrapper: Context });
+                  prep();
+                  const canvas = screen.getByTestId("data-grid-canvas");
+                  const readSaved = (): string[][] => JSON.parse(screen.getByTestId("saved-grid").textContent!);
+                  expect(readSaved()).toEqual(initial);
+                  sendClick(canvas, { clientX: 360, clientY: 180 });
+                  sendClick(canvas, { clientX: vertical ? 360 : 440, clientY: vertical ? 212 : 180, shiftKey: true });
+                  const source = { x: 4, y: 4, width: vertical ? 1 : 2, height: vertical ? 2 : 1 };
+                  expect(selection?.current?.range).toEqual(source);
+                  expect(emitted).toEqual([]);
+                  // Official hit-test places the default handle 3.5px inside the bottom-right.
+                  fireEvent.pointerDown(canvas, { clientX: vertical ? 396.5 : 476.5, clientY: vertical ? 224.5 : 192.5 });
+                  const destinationPoint = { clientX: vertical ? 360 : scenario.target * 80 + 40, clientY: vertical ? 36 + scenario.target * 32 + 16 : 180 };
+                  fireEvent.pointerMove(canvas, { ...destinationPoint, buttons: 1 });
+                  fireEvent.pointerUp(canvas, destinationPoint);
+                  fireEvent.click(canvas, destinationPoint);
+                  expect(fills).toEqual([{ patternSource: source, fillDestination: scenario.destination }]);
+                  expect(selection?.current?.range).toEqual(scenario.destination);
+                  const locations = scenario.indices.map(i => vertical ? [4, i] : [i, 4]);
+                  expect(emitted.map(([c, r]) => [c, r])).toEqual(locations);
+                  const saved = readSaved();
+                  expect([saved[4][4], saved[vertical ? 5 : 4][vertical ? 4 : 5]]).toEqual(["Day", "Night"]);
+                  const values = locations.map(([c, r]) => saved[r][c]);
+                  expect(emitted.map(([, , value]) => value)).toEqual(values);
+                  const changed = new Set(locations.map(([c, r]) => `${c},${r}`));
+                  for (let r = 0; r < 10; r++) for (let c = 0; c < 10; c++) {
+                      if (!changed.has(`${c},${r}`)) expect(saved[r][c]).toBe(initial[r][c]);
+                  }
+                  console.info("GLIDE198_TRACE " + JSON.stringify({ id: scenario.id, source, destination: scenario.destination, emitted, saved, values, expected: scenario.expected }));
+                  expect(JSON.stringify(values), "SOURCE_ANCHORED_VALUES").toBe(JSON.stringify(scenario.expected));
+              });
+          }
+          FROZEN_FIXTURE
+          cat > evidence/source_guard.py <<'SOURCE_GUARD'
+          import hashlib, json, pathlib, subprocess, sys
+          root = pathlib.Path.cwd()
+          evidence = root.parent / 'evidence'
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')[:-1]
+          files = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in paths}
+          overlay = 'packages/core/test/backward-fill-phase198.test.tsx'
+          overlay_hash = hashlib.sha256((root / overlay).read_bytes()).hexdigest()
+          assert overlay_hash == '65d73ac4f090bf10ac9c81e278ef7e0df97048a6744f448d18c0862f94950acb'
+          record = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'tracked': files, 'overlay': {overlay: overlay_hash}}
+          assert record['head'] == '0875d78cc41535a39f8b417ff88ce1ebe129c363'
+          destination = evidence / ('source-' + sys.argv[1] + '.json')
+          destination.write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
+          print(json.dumps({'phase': sys.argv[1], 'tracked_files': len(files), 'manifest_sha256': hashlib.sha256(destination.read_bytes()).hexdigest(), 'overlay_sha256': overlay_hash}))
+          if sys.argv[1] == 'after':
+              assert record == json.loads((evidence / 'source-before.json').read_text()), 'Tracked source or frozen overlay changed'
+              print('SOURCE_GUARD_UNCHANGED')
+          SOURCE_GUARD
+          cat > evidence/classify.py <<'CLASSIFY'
+          import json, pathlib, re
+          p = pathlib.Path('evidence')
+          raw = (p / 'original.log').read_text()
+          print('RAW_TEST_LOG_BEGIN\n' + raw + '\nRAW_TEST_LOG_END')
+          raw = re.sub(r'\x1b\[[0-9;]*m', '', raw)
+          status = (p / 'original.exit').read_text().strip()
+          print('RAW_VITEST_EXIT=' + status)
+          report_text = (p / 'original.json').read_text()
+          print('RAW_JSON_BEGIN\n' + report_text + '\nRAW_JSON_END')
+          report = json.loads(report_text)
+          assert status == '1', status
+          assert (report['numTotalTests'], report['numFailedTests'], report['numPassedTests']) == (6, 2, 4)
+          assert report['numPendingTests'] == 0 and report['numTodoTests'] == 0
+          # In native 0.34.6 these counters refer to task suite errors, not failed testcases.
+          assert report['numFailedTestSuites'] == 0 and report['numPendingTestSuites'] == 0
+          assert report['success'] is False
+          assert len(report['testResults']) == 1 and report['testResults'][0]['message'] == ''
+          cases = report['testResults'][0]['assertionResults']
+          expected = {
+              'up3': (['Day', 'Night', 'Day'], ['Night', 'Day', 'Night'], 'failed'),
+              'left3': (['Day', 'Night', 'Day'], ['Night', 'Day', 'Night'], 'failed'),
+              'down3': (['Day', 'Night', 'Day'], ['Day', 'Night', 'Day'], 'passed'),
+              'right3': (['Day', 'Night', 'Day'], ['Day', 'Night', 'Day'], 'passed'),
+              'up2': (['Day', 'Night'], ['Day', 'Night'], 'passed'),
+              'left2': (['Day', 'Night'], ['Day', 'Night'], 'passed'),
+          }
+          assert len(cases) == 6
+          assert {x['title'] for x in cases} == {f'glide198 {i} source anchored saved values' for i in expected}
+          traces = [json.loads(m.group(1)) for m in re.finditer(r'GLIDE198_TRACE (\{[^\n]+\})', raw)]
+          assert len(traces) == 6 and {x['id'] for x in traces} == set(expected)
+          for case in cases:
+              identity = case['title'].split()[1]
+              actual, oracle, state = expected[identity]
+              assert case['status'] == state, case
+              trace = next(x for x in traces if x['id'] == identity)
+              assert trace['values'] == actual and trace['expected'] == oracle, trace
+              assert [v for _, _, v in trace['emitted']] == actual
+              assert trace['saved'][4][4] == 'Day'
+              assert trace['saved'][5 if identity in ['up3','down3','up2'] else 4][4 if identity in ['up3','down3','up2'] else 5] == 'Night'
+              failures = case['failureMessages']
+              if state == 'failed':
+                  assert len(failures) == 1
+                  failure = failures[0]
+                  assert 'SOURCE_ANCHORED_VALUES' in failure and 'expected' in failure and 'to be' in failure, failure
+                  assert json.dumps(actual, separators=(',', ':')) in failure, failure
+                  assert json.dumps(oracle, separators=(',', ':')) in failure, failure
+              else:
+                  assert failures == []
+          assert 'AssertionError: SOURCE_ANCHORED_VALUES' in raw
+          assert 'backward-fill-phase198.test.tsx:' in raw
+          assert not re.search(r'Unhandled Errors|Unhandled Rejection|Uncaught Exception|Error during test cleanup|Test timed out|Hook timed out|beforeAll hook|afterAll hook', raw, re.I)
+          # Native JSON does not emit numRuntimeErrorTestSuites/unhandledErrors. Absence is unknown.
+          result = {'classification': 'ORIGINAL_NATIVE_ASSERTION_RED', 'raw_exit': 1, 'assertion_failures': ['up3', 'left3'], 'passing_controls': ['down3', 'right3', 'up2', 'left2'], 'runtime_exclusion_evidence': 'Exact case identities and tagged assertion messages, empty file-level error, native suite-error counters, retained verbose raw traces and unhandled/hook-error text checks; no absent JSON field is treated as zero.', 'unavailable_json_fields': ['numRuntimeErrorTestSuites', 'unhandledErrors'], 'test_results': cases, 'traces': traces}
+          (p / 'classification.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          CLASSIFY
+          cd glide
+          git diff --exit-code
+          git diff --cached --exit-code
+          python3 ../evidence/source_guard.py before
+      - name: Install whole pinned project using native lock and npmrc
+        working-directory: glide
+        shell: bash
+        run: npm ci
+      - name: Build whole project with official build command
+        working-directory: glide
+        shell: bash
+        run: npm run build
+      - name: Run original public event cases and retain raw status
+        working-directory: glide/packages/core
+        shell: bash
+        run: |
+          set +e
+          ../../node_modules/.bin/vitest run test/backward-fill-phase198.test.tsx --threads=false --reporter=verbose --reporter=json --outputFile="$GITHUB_WORKSPACE/evidence/original.json" 2>&1 | tee ../../../evidence/original.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > ../../../evidence/original.exit
+          exit "$status"
+      - name: Verify all tracked original source and frozen fixture remain unchanged
+        if: always()
+        working-directory: glide
+        shell: bash
+        run: python3 ../evidence/source_guard.py after
+      - name: Print native raw report and independently classify assertion failures
+        if: always()
+        shell: bash
+        run: python3 evidence/classify.py
