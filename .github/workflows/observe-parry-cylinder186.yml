@@ -1,0 +1,307 @@
+name: Observe original Parry cylinder cap tie
+on:
+  push:
+    branches: ["codex/observe-parry-cylinder186"]
+    paths: [".github/workflows/observe-parry-cylinder186.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  original:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out whole pinned Parry source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dimforge/parry
+          ref: b3c3584ce9be9bf6edb821fd7548b817087131ff
+          path: parry
+          persist-credentials: false
+      - name: Place frozen integration fixture and hash whole tracked source
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat > parry/crates/parry3d/tests/cylinder_cap_tie.rs <<'FROZEN_FIXTURE'
+          use parry3d::math::{Pose, Vector};
+          use parry3d::query::PointQuery;
+          use parry3d::shape::Cylinder;
+          
+          #[test]
+          fn midplane_local_projection_reaches_either_nearest_cap() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let query = Vector::new(3.0, 0.0, 4.0);
+              let projection = disk.project_local_point(query, false);
+              println!("local projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert!(
+                  (projection.point.x - 3.0).abs() < 1.0e-6
+                      && (projection.point.y.abs() - 1.0).abs() < 1.0e-6
+                      && (projection.point.z - 4.0).abs() < 1.0e-6,
+                  "CAP_TIE_LOCAL_PROJECTION: expected (3, +/-1, 4), got {:?}",
+                  projection.point
+              );
+          }
+          
+          #[test]
+          fn midplane_local_signed_distance_is_negative_one() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let distance = disk.distance_to_local_point(Vector::new(3.0, 0.0, 4.0), false);
+              println!("local signed distance: {distance}");
+              assert!(
+                  (distance + 1.0).abs() < 1.0e-6,
+                  "CAP_TIE_LOCAL_SIGNED_DISTANCE: expected -1, got {distance}"
+              );
+          }
+          
+          #[test]
+          fn midplane_local_projection_is_within_two() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let projection =
+                  disk.project_local_point_with_max_dist(Vector::new(3.0, 0.0, 4.0), false, 2.0);
+              println!("local projection at maximum distance 2: {projection:?}");
+              assert!(
+                  projection.is_some(),
+                  "CAP_TIE_LOCAL_MAX_DISTANCE: expected Some at limit 2, got {projection:?}"
+              );
+          }
+          
+          #[test]
+          fn midplane_world_projection_reaches_either_nearest_cap() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let pose = Pose::translation(20.0, 30.0, 40.0);
+              let query = Vector::new(23.0, 30.0, 44.0);
+              let projection = disk.project_point(&pose, query, false);
+              println!("world projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert!(
+                  (projection.point.x - 23.0).abs() < 1.0e-6
+                      && ((projection.point.y - 30.0).abs() - 1.0).abs() < 1.0e-6
+                      && (projection.point.z - 44.0).abs() < 1.0e-6,
+                  "CAP_TIE_WORLD_PROJECTION: expected (23, 30 +/-1, 44), got {:?}",
+                  projection.point
+              );
+          }
+          
+          #[test]
+          fn midplane_world_signed_distance_is_negative_one() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let pose = Pose::translation(20.0, 30.0, 40.0);
+              let distance = disk.distance_to_point(&pose, Vector::new(23.0, 30.0, 44.0), false);
+              println!("world signed distance: {distance}");
+              assert!(
+                  (distance + 1.0).abs() < 1.0e-6,
+                  "CAP_TIE_WORLD_SIGNED_DISTANCE: expected -1, got {distance}"
+              );
+          }
+          
+          #[test]
+          fn midplane_world_projection_is_within_two() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let pose = Pose::translation(20.0, 30.0, 40.0);
+              let projection =
+                  disk.project_point_with_max_dist(&pose, Vector::new(23.0, 30.0, 44.0), false, 2.0);
+              println!("world projection at maximum distance 2: {projection:?}");
+              assert!(
+                  projection.is_some(),
+                  "CAP_TIE_WORLD_MAX_DISTANCE: expected Some at limit 2, got {projection:?}"
+              );
+          }
+          
+          #[test]
+          fn control_solid_inside_returns_the_query_and_zero_distance() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let query = Vector::new(3.0, 0.0, 4.0);
+              let projection = disk.project_local_point(query, true);
+              println!("solid inside projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert_eq!(projection.point, query);
+              assert_eq!(disk.distance_to_local_point(query, true), 0.0);
+              assert!(disk.project_local_point_with_max_dist(query, true, 0.0).is_some());
+          }
+          
+          #[test]
+          fn control_strictly_nearer_side_remains_the_side() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let query = Vector::new(9.5, 0.0, 0.0);
+              let projection = disk.project_local_point(query, false);
+              println!("near side projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert_eq!(projection.point, Vector::new(10.0, 0.0, 0.0));
+              assert_eq!(disk.distance_to_local_point(query, false), -0.5);
+          }
+          
+          #[test]
+          fn control_strictly_nearer_top_remains_the_top() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let query = Vector::new(3.0, 0.25, 4.0);
+              let projection = disk.project_local_point(query, false);
+              println!("near top projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert_eq!(projection.point, Vector::new(3.0, 1.0, 4.0));
+              assert_eq!(disk.distance_to_local_point(query, false), -0.75);
+          }
+          
+          #[test]
+          fn control_strictly_nearer_bottom_remains_the_bottom() {
+              let disk = Cylinder::new(1.0, 10.0);
+              let query = Vector::new(3.0, -0.25, 4.0);
+              let projection = disk.project_local_point(query, false);
+              println!("near bottom projection: {projection:?}");
+              assert!(projection.is_inside);
+              assert_eq!(projection.point, Vector::new(3.0, -1.0, 4.0));
+              assert_eq!(disk.distance_to_local_point(query, false), -0.75);
+          }
+          FROZEN_FIXTURE
+          cat > evidence/source_guard.py <<'SOURCE_GUARD'
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+          import sys
+          
+          root = pathlib.Path.cwd()
+          evidence = root.parent / 'evidence'
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')[:-1]
+          tracked = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in paths}
+          overlay = 'crates/parry3d/tests/cylinder_cap_tie.rs'
+          assert overlay not in paths, 'Fixture must be the only added integration-test overlay'
+          frozen = hashlib.sha256((root / overlay).read_bytes()).hexdigest()
+          expected = json.loads((evidence / 'expected.json').read_text())
+          assert frozen == expected['fixture_sha256'], 'Frozen fixture changed'
+          record = {
+              'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'tracked': tracked,
+              'frozen_overlay': {overlay: frozen},
+          }
+          assert record['head'] == 'b3c3584ce9be9bf6edb821fd7548b817087131ff'
+          assert subprocess.call(['git', 'diff', '--exit-code', '--quiet']) == 0
+          assert subprocess.call(['git', 'diff', '--cached', '--exit-code', '--quiet']) == 0
+          destination = evidence / ('source-' + sys.argv[1] + '.json')
+          destination.write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
+          print('SOURCE_MANIFEST_BEGIN ' + sys.argv[1])
+          print(destination.read_text(), end='')
+          print('SOURCE_MANIFEST_END ' + sys.argv[1])
+          print('SOURCE_MANIFEST_SHA256', hashlib.sha256(destination.read_bytes()).hexdigest())
+          if sys.argv[1] == 'after':
+              assert record == json.loads((evidence / 'source-before.json').read_text())
+              print('SOURCE_GUARD_UNCHANGED')
+          SOURCE_GUARD
+          cat > evidence/diagnose.py <<'DIAGNOSE'
+          import json
+          import pathlib
+          import re
+          
+          evidence = pathlib.Path('evidence')
+          expected = json.loads((evidence / 'expected.json').read_text())
+          raw = (evidence / 'original.log').read_text()
+          print('RAW_CARGO_TEST_EXIT', (evidence / 'original.exit').read_text().strip())
+          assert (evidence / 'compile.exit').read_text().strip() == '0', 'Compilation did not succeed'
+          assert (evidence / 'original.exit').read_text().strip() == '101', 'Unexpected cargo test exit'
+          before = json.loads((evidence / 'source-before.json').read_text())
+          after = json.loads((evidence / 'source-after.json').read_text())
+          assert before == after, 'Tracked source or frozen overlay changed'
+          assert after['head'] == 'b3c3584ce9be9bf6edb821fd7548b817087131ff'
+          assert after['frozen_overlay'] == {'crates/parry3d/tests/cylinder_cap_tie.rs': expected['fixture_sha256']}
+          for log in ['compile.log', 'original.log']:
+              events = [json.loads(line) for line in (evidence / log).read_text().splitlines() if line.startswith('{')]
+              assert any(event.get('reason') == 'build-finished' and event.get('success') is True for event in events), log
+              artifacts = [event for event in events if event.get('reason') == 'compiler-artifact' and event.get('target', {}).get('name') == 'cylinder_cap_tie']
+              assert len(artifacts) == 1 and artifacts[0]['target']['kind'] == ['test'], artifacts
+              assert artifacts[0]['executable'], artifacts
+              print('NATIVE_CARGO_TEST_ARTIFACT', log, json.dumps(artifacts[0], sort_keys=True))
+          identities = re.findall(r'^test ([a-z0-9_]+) \.\.\. (ok|FAILED|ignored)$', raw, re.M)
+          assert len(identities) == len(expected['tests']) == 10, identities
+          assert len(dict(identities)) == len(identities), 'Duplicate native identity'
+          assert set(dict(identities)) == set(expected['tests']), identities
+          rows = []
+          for name, status in identities:
+              marker = expected['tests'][name]
+              assert status == ('FAILED' if marker else 'ok'), (name, status)
+              if marker:
+                  section = re.search(r'^---- ' + re.escape(name) + r' stdout ----\n(.*?)(?=^---- |^failures:|^successes:|^test result:|\Z)', raw, re.M | re.S)
+                  assert section, name
+                  text = section.group(1)
+                  assert re.search(r"thread '" + re.escape(name) + r"'(?: \(\d+\))? panicked at crates/parry3d/tests/cylinder_cap_tie\.rs:\d+:\d+:", text), text
+                  assert marker in text, text
+              rows.append({'name': name, 'native_status': status, 'required_assertion_marker': marker})
+          assert 'test result: FAILED. 4 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out;' in raw
+          assert 'could not compile' not in raw and 'error[E' not in raw
+          record = {'kind': 'parsed native libtest identities, not libtest JSON', 'cargo_exit': 101, 'compile_exit': 0, 'passed': 4, 'failed': 6, 'tests': rows}
+          (evidence / 'native-identities.json').write_text(json.dumps(record, indent=2) + '\n')
+          print('NATIVE_IDENTITIES_JSON_BEGIN')
+          print(json.dumps(record, indent=2))
+          print('NATIVE_IDENTITIES_JSON_END')
+          print('ORIGINAL_NATIVE_ASSERTION_RED')
+          DIAGNOSE
+          cat > evidence/expected.json <<'EXPECTED'
+          {
+            "state": "UNEXECUTED predictions, not native outcomes",
+            "fixture_sha256": "5aa87f12788f732af117002b5aeb7edf7831bf8d2ec2f97c6c69d85dcb4314c2",
+            "tests": {
+              "midplane_local_projection_reaches_either_nearest_cap": "CAP_TIE_LOCAL_PROJECTION:",
+              "midplane_local_signed_distance_is_negative_one": "CAP_TIE_LOCAL_SIGNED_DISTANCE:",
+              "midplane_local_projection_is_within_two": "CAP_TIE_LOCAL_MAX_DISTANCE:",
+              "midplane_world_projection_reaches_either_nearest_cap": "CAP_TIE_WORLD_PROJECTION:",
+              "midplane_world_signed_distance_is_negative_one": "CAP_TIE_WORLD_SIGNED_DISTANCE:",
+              "midplane_world_projection_is_within_two": "CAP_TIE_WORLD_MAX_DISTANCE:",
+              "control_solid_inside_returns_the_query_and_zero_distance": null,
+              "control_strictly_nearer_side_remains_the_side": null,
+              "control_strictly_nearer_top_remains_the_top": null,
+              "control_strictly_nearer_bottom_remains_the_bottom": null
+            }
+          }
+          EXPECTED
+          cd parry
+          python3 ../evidence/source_guard.py before
+      - name: Set up native stable Rust and official system dependencies
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup run stable rustc --version --verbose
+          rustup run stable cargo --version --verbose
+          sudo apt-get update
+          sudo apt-get install -y cmake libxcb-composite0-dev
+      - name: Apply the pinned native CI dependency workaround
+        working-directory: parry
+        shell: bash
+        run: |
+          set +e
+          cargo +stable update -p zune-core@0.5 --precise 0.5.1 2>&1 | tee ../evidence/dependencies.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > ../evidence/dependencies.exit
+          printf 'RAW_DEPENDENCIES_EXIT=%s\n' "$status"
+          if [ -f Cargo.lock ]; then sha256sum Cargo.lock; fi
+          exit "$status"
+      - name: Compile the normal parry3d integration target before classifying any RED
+        working-directory: parry
+        shell: bash
+        run: |
+          set +e
+          RUSTFLAGS='-D warnings' CARGO_TERM_COLOR=never cargo +stable test -p parry3d --features wavefront --test cylinder_cap_tie --no-run --message-format=json 2>&1 | tee ../evidence/compile.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > ../evidence/compile.exit
+          printf 'RAW_CARGO_COMPILE_EXIT=%s\n' "$status"
+          exit "$status"
+      - name: Run original normal Cargo integration target and preserve its actual failing status
+        working-directory: parry
+        shell: bash
+        run: |
+          set +e
+          RUSTFLAGS='-D warnings' CARGO_TERM_COLOR=never cargo +stable test -p parry3d --features wavefront --test cylinder_cap_tie --message-format=json -- --test-threads=1 --show-output --color never 2>&1 | tee ../evidence/original.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > ../evidence/original.exit
+          printf 'RAW_CARGO_TEST_EXIT=%s\n' "$status"
+          exit "$status"
+      - name: Compare all tracked source and the frozen overlay after native work
+        if: ${{ always() }}
+        working-directory: parry
+        shell: bash
+        run: |
+          python3 ../evidence/source_guard.py after
+          if [ -f Cargo.lock ]; then sha256sum Cargo.lock; fi
+      - name: Require exact native assertion failures and four passing controls
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 evidence/diagnose.py
