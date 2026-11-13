@@ -1,0 +1,198 @@
+name: Observe original Floating UI closed-selection typeahead 196
+on:
+  push:
+    branches: ["codex/observe-floating-typeahead196"]
+    paths: [".github/workflows/observe-floating-typeahead196.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  original:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+      TURBO_TELEMETRY_DISABLED: '1'
+    steps:
+      - name: Check out whole pinned Floating UI project
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: floating-ui/floating-ui
+          ref: c3042f1f37d96dfadff1d8894daa31e120d89ed4
+          path: floating-ui
+          persist-credentials: false
+      - name: Install pinned pnpm from native packageManager
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          package_json_file: floating-ui/package.json
+          run_install: false
+      - name: Install Node from native nvmrc
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: floating-ui/.nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Place frozen fixture and source guard
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat > floating-ui/packages/react/test/unit/useTypeahead.closedSelection.test.tsx <<'FROZEN_FIXTURE'
+          // UNEXECUTED diagnostic fixture. Intended native location: packages/react/test/unit/.
+          import {cleanup, render, screen} from '@testing-library/react';
+          import userEvent from '@testing-library/user-event';
+          import {useRef, useState} from 'react';
+          import {afterEach, expect, test, vi} from 'vitest';
+          import {useFloating, useInteractions, useTypeahead} from '../../src';
+
+          const labels = ['Amber', 'Blue', 'Aqua', 'Coral'];
+
+          function ClosedSelect({initial, loaded}: {initial: number; loaded: number}) {
+            const [selectedIndex, setSelectedIndex] = useState(initial);
+            const {refs, context} = useFloating({open: false});
+            const listRef = useRef(labels);
+            const typeahead = useTypeahead(context, {
+              listRef,
+              activeIndex: null,
+              selectedIndex,
+              onMatch: setSelectedIndex,
+            });
+            const {getReferenceProps} = useInteractions([typeahead]);
+            return (
+              <>
+                <button onClick={() => setSelectedIndex(loaded)}>Load selection</button>
+                <button
+                  ref={refs.setReference}
+                  {...getReferenceProps({'aria-label': 'Color'})}
+                >
+                  {labels[selectedIndex]}
+                </button>
+              </>
+            );
+          }
+
+          afterEach(() => {
+            cleanup();
+            vi.clearAllTimers();
+            vi.useRealTimers();
+          });
+
+          test.each([
+            {initial: 0, loaded: 2, expected: 0},
+            {initial: 2, loaded: 0, expected: 2},
+          ])('closed typeahead follows loaded selection $loaded', async ({initial, loaded, expected}) => {
+            vi.useFakeTimers();
+            const user = userEvent.setup({advanceTimers: vi.advanceTimersByTime});
+            render(<ClosedSelect initial={initial} loaded={loaded} />);
+            await user.click(screen.getByRole('button', {name: 'Load selection'}));
+            const select = screen.getByRole('button', {name: 'Color'});
+            expect(select.textContent).toBe(labels[loaded]);
+            await user.click(select);
+            await user.keyboard('a');
+            expect(select.textContent).toBe(labels[expected]);
+          });
+
+          test('closed typeahead starts after the initial selected item', async () => {
+            vi.useFakeTimers();
+            const user = userEvent.setup({advanceTimers: vi.advanceTimersByTime});
+            render(<ClosedSelect initial={2} loaded={2} />);
+            const select = screen.getByRole('button', {name: 'Color'});
+            await user.click(select);
+            await user.keyboard('a');
+            expect(select.textContent).toBe('Amber');
+          });
+          FROZEN_FIXTURE
+          cat > evidence/source_guard.py <<'SOURCE_GUARD'
+          import hashlib, json, pathlib, subprocess, sys
+          root = pathlib.Path.cwd()
+          evidence = root.parent / 'evidence'
+          evidence.mkdir(exist_ok=True)
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')[:-1]
+          files = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in paths}
+          overlay = 'packages/react/test/unit/useTypeahead.closedSelection.test.tsx'
+          overlay_hash = hashlib.sha256((root / overlay).read_bytes()).hexdigest()
+          assert overlay_hash == '3683e4850fed1e4b7472b04082307a94bad0191262070c24e190515b07bb8f33'
+          record = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'tracked': files, 'overlay': {overlay: overlay_hash}}
+          assert record['head'] == 'c3042f1f37d96dfadff1d8894daa31e120d89ed4'
+          destination = evidence / ('source-' + sys.argv[1] + '.json')
+          destination.write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
+          print(json.dumps({'phase': sys.argv[1], 'tracked_files': len(files), 'manifest_sha256': hashlib.sha256(destination.read_bytes()).hexdigest(), 'overlay_sha256': overlay_hash}))
+          if sys.argv[1] == 'after':
+              assert record == json.loads((evidence / 'source-before.json').read_text()), 'Tracked source or frozen overlay changed'
+              print('SOURCE_GUARD_UNCHANGED')
+          SOURCE_GUARD
+          cat > evidence/diagnose.py <<'DIAGNOSE'
+          import json, pathlib, re, xml.etree.ElementTree as ET
+          p = pathlib.Path('evidence')
+          raw = (p / 'original.log').read_text()
+          print('RAW_TEST_LOG_BEGIN\n' + raw + '\nRAW_TEST_LOG_END')
+          print('RAW_VITEST_EXIT=' + (p / 'original.exit').read_text().strip())
+          xml = (p / 'original.xml').read_text()
+          print('RAW_JUNIT_BEGIN\n' + xml + '\nRAW_JUNIT_END')
+          report = json.loads((p / 'original.json').read_text())
+          print('RAW_JSON_BEGIN\n' + json.dumps(report, indent=2) + '\nRAW_JSON_END')
+          cases = list(ET.fromstring(xml).iter('testcase'))
+          expected = {
+              'closed typeahead follows loaded selection 2': "expected 'Aqua' to be 'Amber'",
+              'closed typeahead follows loaded selection 0': "expected 'Amber' to be 'Aqua'",
+              'closed typeahead starts after the initial selected item': None,
+          }
+          assert (p / 'original.exit').read_text().strip() == '1'
+          assert len(cases) == 3 and {x.get('name') for x in cases} == set(expected)
+          rows = []
+          for case in cases:
+              name = case.get('name')
+              failures = case.findall('failure')
+              assert not case.findall('error') and not case.findall('skipped')
+              if expected[name] is None:
+                  assert not failures
+                  status = 'passed'
+              else:
+                  assert len(failures) == 1
+                  failure = failures[0]
+                  failure_text = (failure.get('message') or '') + '\n' + ''.join(failure.itertext())
+                  failure_text = re.sub(r'\x1b\[[0-9;]*m', '', failure_text)
+                  assert 'AssertionError' in ((failure.get('type') or '') + failure_text)
+                  assert expected[name] in failure_text, failure_text
+                  status = 'assertion_failed'
+              rows.append({'identity': case.attrib, 'status': status})
+          assert not list(ET.fromstring(xml).iter('error'))
+          assert (report['numTotalTests'], report['numFailedTests'], report['numPassedTests']) == (3, 2, 1)
+          assert report.get('numPendingTests', 0) == 0 and report.get('numTodoTests', 0) == 0
+          assert report.get('numRuntimeErrorTestSuites', 0) == 0
+          assert not report.get('unhandledErrors')
+          assert not re.search(r'Unhandled Errors|Unhandled Rejection|Uncaught Exception|Error during test cleanup|Test timed out|Hook timed out', raw, re.I)
+          result = {'classification': 'ORIGINAL_NATIVE_ASSERTION_RED', 'raw_exit': 1, 'cases': rows, 'note': 'Diagnostic classification does not convert the failing test step to success.'}
+          (p / 'classification.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          DIAGNOSE
+          cd floating-ui
+          git diff --exit-code
+          git diff --cached --exit-code
+          python3 ../evidence/source_guard.py before
+      - name: Install native project dependencies
+        working-directory: floating-ui
+        shell: bash
+        run: |
+          npm install -g npm@^11.5.1
+          pnpm install --frozen-lockfile
+      - name: Build whole native project as unit CI does
+        working-directory: floating-ui
+        shell: bash
+        run: pnpm run build
+      - name: Run original frozen public-hook cases and retain raw exit
+        working-directory: floating-ui
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @floating-ui/react exec vitest run useTypeahead.closedSelection.test.tsx --reporter=default --reporter=junit --reporter=json --outputFile.junit="$GITHUB_WORKSPACE/evidence/original.xml" --outputFile.json="$GITHUB_WORKSPACE/evidence/original.json" 2>&1 | tee ../evidence/original.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > ../evidence/original.exit
+          exit "$status"
+      - name: Verify all original tracked source and frozen overlay after execution
+        if: always()
+        working-directory: floating-ui
+        shell: bash
+        run: python3 ../evidence/source_guard.py after
+      - name: Print actual reports and classify assertion-only original RED
+        if: always()
+        shell: bash
+        run: python3 evidence/diagnose.py
